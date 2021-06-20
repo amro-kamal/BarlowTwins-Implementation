@@ -1,5 +1,7 @@
 import torchvision
+import torchvision.datasets as datasets 
 import torch
+from torch import nn, optim
 from barlowTwins import BarlowTwins
 from dataAugmentation import Transform
 import torch_xla.distributed.parallel_loader as pl
@@ -7,15 +9,17 @@ import torch_xla
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.xla_multiprocessing as xmp
 import argparse
+from pathlib import Path
+import logging
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
 parser.add_argument('--data', type=str, default='CIFAR10',
                     help='dataset name')
-parser.add_argument('--workers', default=8, type=int, metavar='N',
+parser.add_argument('--workers', default=2, type=int, metavar='N',
                     help='number of data loader workers')
-parser.add_argument('--epochs', default=1000, type=int, metavar='N',
+parser.add_argument('--epochs', default=5, type=int, metavar='N',
                     help='number of total epochs to run')
-parser.add_argument('--batch-size', default=2048, type=int, metavar='N',
+parser.add_argument('--batch-size', default=4, type=int, metavar='N',
                     help='mini-batch size')
 parser.add_argument('--learning-rate-weights', default=0.2, type=float, metavar='LR',
                     help='base learning rate for weights')
@@ -32,10 +36,14 @@ parser.add_argument('--print-freq', default=100, type=int, metavar='N',
 parser.add_argument('--checkpoint-dir', default='./checkpoint/', type=Path,
                     metavar='DIR', help='path to checkpoint directory')
 
+logger = logging.getLogger(__name__)
+
  #TODO : save ad load the model and optimizer                   
 def main():
     args=parser.parse_args()
-    model = BarlowTwins()
+    logger.info('building Resnet twins.....')
+    print('building the model')
+    model = BarlowTwins(args)
     param_weights = []
     param_biases = []
     for param in model.parameters():
@@ -54,7 +62,7 @@ def main():
     args.seed=44
     # flaogs={'model':model, 'epochs':epochs, 'batch_size':batch_size, 'num_workers':num_workers,
     #  'lambd':lambd, 'optimizer':optimizer, 'transforms':Transform(), 'seed':seed}
-
+    print('calling spawn')
     xmp.spawn(XLA_trainer, args=(args,), nprocs=8, start_method='fork')
 
 def XLA_trainer(index, args):
@@ -63,67 +71,81 @@ def XLA_trainer(index, args):
     2-create dataloader
     3-call train() function
     '''
-
+    print('starting xla traininer')
     # Sets a common random seed - both for initialization and ensuring graph is the same
-    torch.manual_seed(args['seed'])
+    torch.manual_seed(args.seed)
+    print('setting seed')
     # Acquires the (unique) Cloud TPU core corresponding to this process's index
     device = xm.xla_device()  
-
+    logger.info(f'Training will start on {device}')
+    print(f'Training will start on {device}')
     # Downloads train and test datasets
     # Note: master goes first and downloads the dataset only once (xm.rendezvous)
     #   all the other workers wait for the master to be done downloading.
 
     if not xm.is_master_ordinal():
         xm.rendezvous('download_only_once')
+    
+    logger.info('Downloading the data.......')
 
     train_dataset = datasets.CIFAR10(
         "/data",
         train=True,
         download=True,
         transform=args.transforms
-        )
+        ) 
+
+    logger.info('Data is ready ✅')
+
     if  xm.is_master_ordinal():
         xm.rendezvous('download_only_once')
 
     # Creates the (distributed) train sampler, which let this process only access
     # its portion of the training dataset.
+    print('creating the sampler')
     train_sampler = torch.utils.data.distributed.DistributedSampler(
         train_dataset,
         num_replicas=xm.xrt_world_size(),
         rank=xm.get_ordinal(),
         shuffle=True)
-    
+    print('sampler created ✅')
+
     # Creates dataloaders, which load data in batches
     # Note: test loader is not shuffled or sampled
+    print('creating the dataloader')
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         sampler=train_sampler,
-        num_workers=args.num_workers,
+        num_workers=args.workers,
         drop_last=True)
+    print('dataloader is ready ✅')
 
   
-    train(args.model, args.epochs, train_loader, args.lambd, args.optimizer)
+    train(args.model.to(device), args.epochs, train_loader, args.lambd, args.optimizer ,device)
 
 
 def train(model, epochs, train_loader, lambd, optimizer, device):
     model.zero_grad()
-  
-    for e in epochs:
+    
+    for e in range(epochs):
+        print(f'device {device} , epoch {e}')
         epoch_loss=0
-        model.trian()
+        model.train()
 
         #ParallelLoader, so each TPU core has unique batch
         para_train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
-        for step, ((x1, x2), _) in enumerate(para_train_loader, start=epoch * len(para_train_loader)):
-
-            loss=model(x1, x2, lambd)
+        for step, ((x1, x2), _) in enumerate(para_train_loader, start=e * len(para_train_loader)):
+            print(f'device {device} , epoch {e} , x1 shape {x1.shape} , x2 shape {x2.shape}')
+            loss=model(x1, x2)
+            print('done model forward✅✅✅')
             lr_schedular(args, optimizer, para_train_loader, step)
-            epoch_loss+=loss.item()
+            # epoch_loss+=loss.item()
 
             loss.backword()
             optimizer.step()
             model.zero_grad()
+            print('done batch ✅✅✅')
         print(f'epoch {e}: loss= {epoch_loss}')
 
 
