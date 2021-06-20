@@ -8,9 +8,8 @@ import copy
 class BarlowTwins(nn.Module):
     ''' 
       resnet with custom FC head
-
     '''
-    def __init__(self, projection_dims:List = [2048,2048,2048] ):
+    def __init__(self, projection_dims=[2048,2048,2048] ):
         super().__init__()
         self.resnet_backbone = torch.models.resnet50(pretrained=Flase)
         self.resnet_backbone.fc = nn.Identity()

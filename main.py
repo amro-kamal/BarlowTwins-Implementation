@@ -54,7 +54,6 @@ def main():
     args.seed=44
     # flaogs={'model':model, 'epochs':epochs, 'batch_size':batch_size, 'num_workers':num_workers,
     #  'lambd':lambd, 'optimizer':optimizer, 'transforms':Transform(), 'seed':seed}
-    def train(model, epochs, train_loader, lambd, optimizer, device, Transforms):
 
     xmp.spawn(XLA_trainer, args=(args,), nprocs=8, start_method='fork')
 
