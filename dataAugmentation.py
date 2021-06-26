@@ -16,7 +16,8 @@ class Transform:
             GaussianBlur(p=1.0),
             Solarization(p=0.0),
             transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+            transforms.Normalize(
+                    mean=(0.4914, 0.4822, 0.4465), std=(0.2023, 0.1994, 0.2010))
         ])
         self.transform_prime = transforms.Compose([
             transforms.RandomResizedCrop(224, interpolation=Image.BICUBIC),
@@ -30,7 +31,8 @@ class Transform:
             GaussianBlur(p=0.1),
             Solarization(p=0.2),
             transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+            transforms.Normalize( mean=(0.4914, 0.4822, 0.4465), std=(0.2023, 0.1994, 0.2010))
+
         ])
 
     def __call__(self, x):
