@@ -50,9 +50,10 @@ parser.add_argument('--checkpoint-dir', default='./checkpoint/', type=Path,
 
 # logger = logging.getLogger(__name__)
 logger=init_logger()
+args=parser.parse_args()
+
  #TODO : save ad load the model and optimizer                   
 def main():
-    args=parser.parse_args()
     logger.info('building Resnet twins.....')
     # print('building the model')
     model = BarlowTwins(args)
@@ -77,12 +78,42 @@ def main():
     logger.info('calling spawn....')
     xmp.spawn(XLA_trainer, args=(args,), nprocs=8, start_method='fork')
 
+SERIAL_EXEC = xmp.MpSerialExecutor()
+
 def XLA_trainer(index, args):
     '''
     1-create sampler
     2-create dataloader
     3-call train() function
     '''
+
+    # Downloads train and test datasets
+    # Note: master goes first and downloads the dataset only once (xm.rendezvous)
+    #   all the other workers wait for the master to be done downloading.
+    # if not xm.is_master_ordinal():
+    #     xm.rendezvous('download_only_once')
+    
+    # if xm.is_master_ordinal():
+    #   logger.info(f'waiting for {device} to download the data')
+    def get_data():
+      logger.info(f'Downloading the data.......')
+      train_dataset = datasets.CIFAR10(
+          "/data",
+          train=True,
+          download=True,
+          transform=args.transforms
+          ) 
+      logger.info(f'Data is ready 😍😍😍😍✅')
+      return train_dataset
+
+    train_dataset=SERIAL_EXEC.run(get_data)
+
+    # logger.info(f'[{xm.get_ordinal}] device {device} Data is ready ✅')
+
+    # if  xm.is_master_ordinal():
+    #     xm.rendezvous('download_only_once')
+
+
     device = xm.xla_device()  
 
     logger.info(f'[{xm.get_ordinal()}] device {device} starting xla traininer')
@@ -91,27 +122,7 @@ def XLA_trainer(index, args):
     logger.info(f'[{xm.get_ordinal()}] device {device} setting seed')
     # Acquires the (unique) Cloud TPU core corresponding to this process's index
     logger.info(f'[{xm.get_ordinal()}] device {device} Training will start on {device}')
-    # Downloads train and test datasets
-    # Note: master goes first and downloads the dataset only once (xm.rendezvous)
-    #   all the other workers wait for the master to be done downloading.
 
-    if not xm.is_master_ordinal():
-        xm.rendezvous('download_only_once')
-    
-    logger.info(f'[{xm.get_ordinal()}] device {device} Downloading the data.......')
-    if xm.is_master_ordinal():
-      logger.info(f'waiting for {device} to download the data')
-    train_dataset = datasets.CIFAR10(
-        "/data",
-        train=True,
-        download=True,
-        transform=args.transforms
-        ) 
-
-    logger.info(f'[{xm.get_ordinal}] device {device} Data is ready ✅')
-
-    if  xm.is_master_ordinal():
-        xm.rendezvous('download_only_once')
 
     # Creates the (distributed) train sampler, which let this process only access
     # its portion of the training dataset.
@@ -128,7 +139,7 @@ def XLA_trainer(index, args):
     logger.info(f'[{xm.get_ordinal()}] device {device} creating the dataloader')
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
+        batch_size=16,
         sampler=train_sampler,
         num_workers=args.workers,
         drop_last=True)
@@ -139,8 +150,8 @@ def XLA_trainer(index, args):
 
 
 def train(model, epochs, train_loader, lambd, optimizer, device):
-    model.zero_grad()
-    
+    # model.zero_grad()
+
     for e in range(epochs):
         logger.info(f'[{xm.get_ordinal()}] device {device} , epoch {e}')
         epoch_loss=0
@@ -150,18 +161,20 @@ def train(model, epochs, train_loader, lambd, optimizer, device):
         para_train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
         for step, ((x1, x2), _) in enumerate(para_train_loader, start=e * len(para_train_loader)):
             logger.info(f'[{xm.get_ordinal()}] device {device}, step {step} epoch {e} , x1 shape {x1.shape} , x2 shape {x2.shape}')
+            optimizer.zero_grad()
             loss=model(x1, x2)
-            logger.info('[{xm.get_ordinal()}] device {device}, done model forward✅✅✅')
+            logger.info(f'[{xm.get_ordinal()}] device {device}, done model forward✅✅✅')
             lr_schedular(args, optimizer, para_train_loader, step)
             # epoch_loss+=loss.item()
 
-            loss.backword()
-            optimizer.step()
-            model.zero_grad()
+            loss.backward()
+
+            # optimizer.step()
+            xm.optimizer_step(optimizer)
+
             logger.info(f'[{xm.get_ordinal()}] device {device}, done batch ✅✅✅')
         logger.info(f'[{xm.get_ordinal()}] device {device}, epoch {e}: loss= {epoch_loss}')
-
-
+  
 def lr_schedular(args, optimizer, loader, step):
     max_steps = args.epochs * len(loader)
     warmup_steps = 10 * len(loader)
