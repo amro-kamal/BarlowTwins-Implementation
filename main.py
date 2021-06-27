@@ -12,26 +12,16 @@ import argparse
 from pathlib import Path
 import logging
 from logging import getLogger, INFO, FileHandler,  Formatter,  StreamHandler
-
-def init_logger(log_file='train.log'):
-    logger = getLogger(__name__)
-    logger.setLevel(INFO)
-    handler1 = StreamHandler()
-    handler1.setFormatter(Formatter("%(message)s"))
-    handler2 = FileHandler(filename=log_file)
-    handler2.setFormatter(Formatter("%(message)s"))
-    logger.addHandler(handler1)
-    logger.addHandler(handler2)
-    return logger
+from utils import init_logger
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
 parser.add_argument('--data', type=str, default='CIFAR10',
                     help='dataset name')
-parser.add_argument('--workers', default=2, type=int, metavar='N',
+parser.add_argument('--workers', default=4, type=int, metavar='N',
                     help='number of data loader workers')
-parser.add_argument('--epochs', default=5, type=int, metavar='N',
+parser.add_argument('--epochs', default=2, type=int, metavar='N',
                     help='number of total epochs to run')
-parser.add_argument('--batch-size', default=4, type=int, metavar='N',
+parser.add_argument('--batch-size', default=16, type=int, metavar='N',
                     help='mini-batch size')
 parser.add_argument('--learning-rate-weights', default=0.2, type=float, metavar='LR',
                     help='base learning rate for weights')
@@ -152,29 +142,33 @@ def XLA_trainer(index, args):
 def train(model, epochs, train_loader, lambd, optimizer, device):
     # model.zero_grad()
 
-    for e in range(epochs):
-        logger.info(f'[{xm.get_ordinal()}] device {device} , epoch {e}')
+    for e in range(1):
+        logger.info(f'[{xm.get_ordinal()}] device {device} , epoch {e+1}')
         epoch_loss=0
         model.train()
 
         #ParallelLoader, so each TPU core has unique batch
         para_train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
         for step, ((x1, x2), _) in enumerate(para_train_loader, start=e * len(para_train_loader)):
-            logger.info(f'[{xm.get_ordinal()}] device {device}, step {step} epoch {e} , x1 shape {x1.shape} , x2 shape {x2.shape}')
-            optimizer.zero_grad()
-            loss=model(x1, x2)
-            logger.info(f'[{xm.get_ordinal()}] device {device}, done model forward✅✅✅')
-            lr_schedular(args, optimizer, para_train_loader, step)
-            # epoch_loss+=loss.item()
+          pass
+            # # logger.info(f'[{xm.get_ordinal()}] device {device}, step {step} epoch {e} , x1 shape {x1.shape} , x2 shape {x2.shape}')
+            # optimizer.zero_grad()
+            # loss=model(x1, x2)
+            # # logger.info(f'[{xm.get_ordinal()}] device {device}, done model forward✅✅✅')
+            # lr_schedular(args, optimizer, para_train_loader, step)
+            # # epoch_loss+=loss.item()
 
-            loss.backward()
+            # loss.backward()
 
-            # optimizer.step()
-            xm.optimizer_step(optimizer)
+            # # optimizer.step()
+            # xm.optimizer_step(optimizer)
 
-            logger.info(f'[{xm.get_ordinal()}] device {device}, done batch ✅✅✅')
-        logger.info(f'[{xm.get_ordinal()}] device {device}, epoch {e}: loss= {epoch_loss}')
-  
+            # logger.info(f'[{xm.get_ordinal()}] device {device}, done batch ✅✅✅')
+        # logger.info(f'[{xm.get_ordinal()}] device {device}, epoch {e+1}: loss= {epoch_loss}')
+    if xm.is_master_ordinal():
+      logger.info('saving the model.....')
+    # torch.save(model.state_dict(),args.checkpoint_dir/'resnet50')
+    xm.save(list(model.children())[0].state_dict(), args.checkpoint_dir/'resnet50', master_only=True, global_master=False)
 def lr_schedular(args, optimizer, loader, step):
     max_steps = args.epochs * len(loader)
     warmup_steps = 10 * len(loader)

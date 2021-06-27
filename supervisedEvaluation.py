@@ -9,12 +9,19 @@ import torch_xla.distributed.xla_multiprocessing as xmp
 import argparse
 from pathlib import Path
 from utils import init_logger
-logger = init_logger()
+import json
+import os
+import random
+import signal
+import sys
+import time
+import urllib
+logger = init_logger('eval.log')
 
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
-parser.add_argument('data', type=str, metavar='CIFAR10',
-                    help='path to dataset')
+# parser.add_argument('data', type=str, metavar='CIFAR10',
+#                     help='path to dataset')
 parser.add_argument('pretrained', type=Path, metavar='FILE',
                     help='path to pretrained model')
 parser.add_argument('--weights', default='freeze', type=str,
@@ -37,41 +44,15 @@ parser.add_argument('--weight-decay', default=1e-6, type=float, metavar='W',
                     help='weight decay')
 parser.add_argument('--print-freq', default=100, type=int, metavar='N',
                     help='print frequency')
-parser.add_argument('--checkpoint-dir', default='./checkpoint/lincls/', type=Path,
+parser.add_argument('--checkpoint-dir', default='./checkpoint/resnet50_finetuned/', type=Path,
                     metavar='DIR', help='path to checkpoint directory')
 
 
- #TODO : save ad load the model and optimizer                   
+ #TODO : save ad load the model and optimizer   
+args=parser.parse_args()                
 def main():
-    args=parser.parse_args()
     args.rank=0
     
-    # logger.info('building Resnet twins.....')
-    # print('building the model')
-    # model = 
-    # param_weights = []
-    # param_biases = []
-    # for param in model.parameters():
-    #     if param.ndim == 1:
-    #         param_biases.append(param)
-    #     else:
-    #         param_weights.append(param)
-    # parameters = [{'params': param_weights}, {'params': param_biases}]
-    # optimizer = LARS(parameters, lr=0, weight_decay=args.weight_decay,
-    #                  weight_decay_filter=exclude_bias_and_norm,
-    #                  lars_adaptation_filter=exclude_bias_and_norm)
-    # args.optimizer=optimizer
-
-    # args.model=model
-    # args.transforms=Transform()
-    # args.seed=44
-    # flaogs={'model':model, 'epochs':epochs, 'batch_size':batch_size, 'num_workers':num_workers,
-    #  'lambd':lambd, 'optimizer':optimizer, 'transforms':Transform(), 'seed':seed}
-
-
-
-
-
     start_time = time.time()
 
     print('calling spawn')
@@ -86,8 +67,8 @@ def XLA_trainer(index, args):
     '''
     print('starting xla traininer')
     # Sets a common random seed - both for initialization and ensuring graph is the same
-    torch.manual_seed(args.seed)
-    print('setting seed')
+    # torch.manual_seed(args.seed)
+    # print('setting seed')
     # Acquires the (unique) Cloud TPU core corresponding to this process's index
     device = xm.xla_device()  
     logger.info(f'Training will start on {device}')
@@ -97,9 +78,10 @@ def XLA_trainer(index, args):
     #   all the other workers wait for the master to be done downloading.
 
 
-    model = models.resnet50().cuda(gpu)
+    model = torchvision.models.resnet50(pretrained=False)
     state_dict = torch.load(args.pretrained, map_location='cpu')
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    logger.info(f'missing keys {missing_keys} , unexpected_keys {unexpected_keys}')
     assert missing_keys == ['fc.weight', 'fc.bias'] and unexpected_keys == []
     model.fc.weight.data.normal_(mean=0.0, std=0.01)
     model.fc.bias.data.zero_()
@@ -113,7 +95,7 @@ def XLA_trainer(index, args):
         else:
             model_parameters.append(param)
 
-    criterion = nn.CrossEntropyLoss().cuda(gpu)
+    criterion = nn.CrossEntropyLoss()
 
     param_groups = [dict(params=classifier_parameters, lr=args.lr_classifier)]
     if args.weights == 'finetune':
@@ -195,12 +177,10 @@ def XLA_trainer(index, args):
     print('dataloader is ready ✅')
 
 
-
-
-  
-    train(model.to(device), args.epochs, train_loader, args.lambd, args.optimizer ,device)
+    # train(model.to(device), args.epochs, train_loader, args.lambd, args.optimizer ,device)
 
     start_time = time.time()
+    model.to(device)
     for epoch in range(start_epoch, args.epochs):
         # train
         if args.weights == 'finetune':
