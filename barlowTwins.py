@@ -39,7 +39,7 @@ class BarlowTwins(nn.Module):
         # print('cross correlation ✅✅✅')
         cross_correlation.div_(self.args.batch_size)
         # torch.distributed.all_reduce(cross_correlation)
-        # xm.all_reduce(inputs=cross_correlation)
+        xm.all_reduce(xm.REDUCE_SUM , inputs=cross_correlation)
         # sum the cross-correlation matrix between all gpus
         on_diag = torch.diagonal(cross_correlation).add_(-1).pow_(2).sum()
         off_diag = off_diagonal(cross_correlation).pow_(2).sum()

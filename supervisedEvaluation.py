@@ -1,5 +1,7 @@
 import torchvision
 import torchvision.datasets as datasets 
+from torchvision.transforms import transforms
+
 import torch
 from torch import nn, optim
 import torch_xla.distributed.parallel_loader as pl
@@ -20,11 +22,12 @@ logger = init_logger('eval.log')
 
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
-# parser.add_argument('data', type=str, metavar='CIFAR10',
-#                     help='path to dataset')
+
 parser.add_argument('pretrained', type=Path, metavar='FILE',
                     help='path to pretrained model')
-parser.add_argument('--weights', default='freeze', type=str,
+parser.add_argument('--data',default='evaldata', type=Path, metavar='CIFAR10',
+                    help='path to dataset')
+parser.add_argument('--weights', default='finetune', type=str,
                     choices=('finetune', 'freeze'),
                     help='finetune or freeze resnet weights')
 parser.add_argument('--train-percent', default=100, type=int,
@@ -34,7 +37,7 @@ parser.add_argument('--workers', default=8, type=int, metavar='N',
                     help='number of data loader workers')
 parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
-parser.add_argument('--batch-size', default=256, type=int, metavar='N',
+parser.add_argument('--batch-size', default=16, type=int, metavar='N',
                     help='mini-batch size')
 parser.add_argument('--lr-backbone', default=0.0, type=float, metavar='LR',
                     help='backbone base learning rate')
@@ -58,6 +61,8 @@ def main():
     print('calling spawn')
     xmp.spawn(XLA_trainer, args=(args,), nprocs=8, start_method='fork')
 
+
+SERIAL_EXEC = xmp.MpSerialExecutor()
 def XLA_trainer(index, args):
     args.rank = index
     '''
@@ -79,7 +84,7 @@ def XLA_trainer(index, args):
 
 
     model = torchvision.models.resnet50(pretrained=False)
-    state_dict = torch.load(args.pretrained, map_location='cpu')
+    state_dict = torch.load(args.pretrained, map_location='cpu')['model']
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
     logger.info(f'missing keys {missing_keys} , unexpected_keys {unexpected_keys}')
     assert missing_keys == ['fc.weight', 'fc.bias'] and unexpected_keys == []
@@ -120,36 +125,45 @@ def XLA_trainer(index, args):
     traindir = args.data / 'train'
     valdir = args.data / 'val'
 
-    normalize = transforms.Normalize( mean=(0.4914, 0.4822, 0.4465), std=(0.2023, 0.1994, 0.2010))
 
+    def get_data():
+      # if not xm.is_master_ordinal():
+      #     xm.rendezvous('download_only_once')
+      
+      logger.info('Downloading the data.......')
 
-    if not xm.is_master_ordinal():
-        xm.rendezvous('download_only_once')
-    
-    logger.info('Downloading the data.......')
+      train_dataset = datasets.CIFAR10(
+          "/data/train",
+          train=True,
+          download=True,
+          transform=transforms.Compose([
+              transforms.RandomResizedCrop(64),
+              transforms.ToTensor(),
+              transforms.Normalize(
+                    mean=(0.4914, 0.4822, 0.4465), std=(0.2023, 0.1994, 0.2010))])
+      )
+          
 
-    train_dataset = datasets.CIFAR10(traindir,
-            train=True, download=True, 
-            transform=transforms.Compose([
-            transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ]))
+      val_dataset = datasets.CIFAR10(
+          "/data/val",
+          train=False,
+          download=True,
+              transform=transforms.Compose([
+              transforms.Resize(64),
+              transforms.CenterCrop(64),
+              transforms.ToTensor(),
+              transforms.Normalize(
+                    mean=(0.4914, 0.4822, 0.4465), std=(0.2023, 0.1994, 0.2010))
+          ])          ) 
 
-    
+  
+      return train_dataset , val_dataset
 
-    val_dataset = datasets.ImageFolder(valdir, 
-            train=True, download=True,
-            transform=transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            normalize,
-        ]))
+      # if  xm.is_master_ordinal():
+      #     xm.rendezvous('download_only_once')
 
-    if  xm.is_master_ordinal():
-        xm.rendezvous('download_only_once')
+    train_dataset ,val_dataset =SERIAL_EXEC.run(get_data)
+
     
     print('creating the sampler')
     train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -182,6 +196,7 @@ def XLA_trainer(index, args):
     start_time = time.time()
     model.to(device)
     for epoch in range(start_epoch, args.epochs):
+        logger.info(f'epoch {epoch+1}')
         # train
         if args.weights == 'finetune':
             model.train()
@@ -192,13 +207,15 @@ def XLA_trainer(index, args):
         # train_sampler.set_epoch(epoch)
         para_train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
         for step, (images, target) in enumerate(para_train_loader, start=epoch * len(train_loader)):
+            logger.info(f'batch shape {images.shape}')
             output = model(images)
+            logger.info(f'output shape {output.shape}')
             loss = criterion(output, target)
             optimizer.zero_grad()
             loss.backward()
             xm.optimizer_step(optimizer)  # Note: barrier=True not needed when using ParallelLoader 
             if step % args.print_freq == 0:
-                torch.distributed.reduce(loss.div_(len(xm.get_xla_supported_devices())), 0)
+                xm.all_reduce('sum' , loss.div_(len(xm.get_xla_supported_devices())))
                 # # if args.rank == 0:
                 if xm.is_master_ordinal():
                     pg = optimizer.param_groups
@@ -208,7 +225,7 @@ def XLA_trainer(index, args):
                                  lr_classifier=lr_classifier, loss=loss.item(),
                                  time=int(time.time() - start_time))
                     print(json.dumps(stats))
-                    print(json.dumps(stats), file=stats_file)
+                    # print(json.dumps(stats), file=stats_file)
 
         # evaluate
         model.eval()
