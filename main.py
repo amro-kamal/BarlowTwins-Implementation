@@ -16,16 +16,16 @@ from utils import init_logger
 from earlyStopping import EarlyStopping
 from tqdm.notebook import tqdm
 from torch.utils.tensorboard import SummaryWriter
-
+import time
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
 parser.add_argument('--data', type=str, default='CIFAR10',
                     help='dataset name')
 parser.add_argument('--workers', default=4, type=int, metavar='N',
                     help='number of data loader workers')
-parser.add_argument('--epochs', default=10, type=int, metavar='N',
+parser.add_argument('--epochs', default=500, type=int, metavar='N',
                     help='number of total epochs to run')
-parser.add_argument('--batch-size', default=256, type=int, metavar='N',
+parser.add_argument('--batch-size', default=512, type=int, metavar='N',
                     help='mini-batch size')
 parser.add_argument('--learning-rate-weights', default=0.2, type=float, metavar='LR',
                     help='base learning rate for weights')
@@ -51,7 +51,7 @@ def main():
     SEED=42
     torch.manual_seed(SEED)
     torch.cuda.manual_seed_all(SEED)
-    xm.set_rng_seed(SEED)
+    # xm.set_rng_seed(SEED)
 
 
     logger.info('building Resnet twins.....')
@@ -71,9 +71,9 @@ def main():
                      lars_adaptation_filter=exclude_bias_and_norm)
 
     start_epoch=0
-    if (args.checkpoint_dir / 'checkpoint.pth').is_file():
+    if (args.checkpoint_dir / 'checkpoint.ckpt').is_file():
         logger.info(f'loading the model to continue training.....')
-        ckpt = torch.load(args.checkpoint_dir / 'checkpoint.pth',
+        ckpt = torch.load(args.checkpoint_dir / 'checkpoint.ckpt',
                           map_location='cpu')
         start_epoch = ckpt['epoch']
         model.load_state_dict(ckpt['model'])
@@ -164,9 +164,9 @@ def train(model, epochs, train_loader, lambd, optimizer, device):
     global_step=0
     writer=SummaryWriter('logs/barlowtwins/tensorboarf')
     start_time = time.time()
-    early_stopping = EarlyStopping(patience=10, verbose=True)
-    for epoch in range(args.conyinue_from, args.conyinue_from+epochs):
-        logger.info(f'[{xm.get_ordinal()}] device {device} , epoch {e+1}')
+    early_stopping = EarlyStopping(patience=10, verbose=True ,path=args.checkpoint_dir/'checkpoint.ckpt' )
+    for epoch in range(args.continue_from, args.continue_from+epochs):
+        logger.info(f'[{xm.get_ordinal()}] device {device} , epoch {epoch+1}')
         epoch_loss=0
         epoch_start_time = time.time()
         model.train()
@@ -177,10 +177,11 @@ def train(model, epochs, train_loader, lambd, optimizer, device):
         loop=tqdm(para_train_loader , leave=False)
         for ((x1, x2), _) in loop:#, start=epoch * len(para_train_loader)):
             step+=1
-            # logger.info(f'[{xm.get_ordinal()}] device {device}, step {step} epoch {e} , x1 shape {x1.shape} , x2 shape {x2.shape}')
+            # logger.info(f'[{xm.get_ordinal()}] device {device}, step {step} epoch {epoch} , x1 shape {x1.shape} , x2 shape {x2.shape}')
             optimizer.zero_grad()
             loss=model(x1, x2)
-            writer.add_scaler('ssloss',loss.item(),global_step=global_step)
+            writer.add_scalar('ssloss',loss.item(),global_step=global_step)
+            global_step+=1
             # logger.info(f'[{xm.get_ordinal()}] device {device}, done model forward✅✅✅')
             lr_schedular(args, optimizer, para_train_loader, step)
             # epoch_loss+=loss.item()
@@ -190,25 +191,21 @@ def train(model, epochs, train_loader, lambd, optimizer, device):
             # optimizer.step()
             xm.optimizer_step(optimizer)
 
-            loop.set_discription(f'[{device}] epoch {epoch+1}/{epochs}')
+            loop.set_description(f'[{device}] epoch {epoch+1}/{epochs}')
             loop.set_postfix(loss= loss.item())
 
             # logger.info(f'[{xm.get_ordinal()}] device {device}, done batch ✅✅✅')
             if xm.is_master_ordinal() and  step % args.print_freq == 0:
-                logger.info(f'epoch={epoch}, step={step},
-                                 lr_weights={optimizer.param_groups[0]['lr']},
-                                 lr_biases={optimizer.param_groups[1]['lr']},
-                                 loss={loss.item()},
-                                 time={int(time.time() - start_time)}')
+                logger.info(f'epoch={epoch+1}') #, step={step}, lr_weights={optimizer.param_groups[0]['lr']}, lr_biases={optimizer.param_groups[1]['lr']}, loss={loss.item()}, time={int(time.time() - start_time)}')
 
-        # logger.info(f'[{xm.get_ordinal()}] device {device}, epoch {e+1}: loss= {epoch_loss}')
+        # logger.info(f'[{xm.get_ordinal()}] device {device}, epoch {epoch+1}: loss= {epoch_loss}')
 
         #saving the model   
         if xm.is_master_ordinal():
             logger.info(f'epoch {epoch+1} ended loss : {loss.item()}, time: {int(time.time() - epoch_start_time)} saving the model.....🤪🤪🤪🤪🤪🤪🤪')
        # torch.save(model.state_dict(),args.checkpoint_dir/'resnet50')
 
-        # xm.save(state, args.checkpoint_dir/'checkpoint.pth', master_only=True, global_master=False)
+        # xm.save(state, args.checkpoint_dir/'checkpoint.ckpt', master_only=True, global_master=False)
         if xm.is_master_ordinal():
            state = dict(epoch=epoch + 1, model=list(model.children())[0].state_dict(),
                          optimizer=optimizer.state_dict())
@@ -219,7 +216,7 @@ def train(model, epochs, train_loader, lambd, optimizer, device):
 
     #save the final model
     logger.info(f'saving the final model , loss: {loss.item()} .....🤪🤪🤪🤪🤪🤪🤪')
-    xm.save(list(model.children())[0].state_dict(), args.checkpoint_dir/'resnet50.pth', master_only=True, global_master=False)
+    xm.save(list(model.children())[0].state_dict(), args.checkpoint_dir/'resnet50.ckpt', master_only=True, global_master=False)
 
 
 def lr_schedular(args, optimizer, loader, step):
