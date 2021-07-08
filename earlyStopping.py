@@ -47,8 +47,10 @@ class EarlyStopping:
     def save_checkpoint(self, val_loss, state):
         '''Saves model when validation loss decrease.'''
         if self.verbose:
-            self.trace_func(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
+            self.trace_func(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving the model ...')
         # torch.save(model.state_dict(), self.path)
-        xm.save(state, self.path, master_only=True, global_master=False)
+        if xm.is_master_ordinal():
+          torch.save(state, self.path)#, master_only=True, global_master=False)
+        print('model saved ✅✅')
 
         self.val_loss_min = val_loss

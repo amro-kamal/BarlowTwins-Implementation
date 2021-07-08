@@ -17,6 +17,7 @@ from earlyStopping import EarlyStopping
 from tqdm.notebook import tqdm
 from torch.utils.tensorboard import SummaryWriter
 import time
+import math
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
 parser.add_argument('--data', type=str, default='CIFAR10',
@@ -25,7 +26,7 @@ parser.add_argument('--workers', default=4, type=int, metavar='N',
                     help='number of data loader workers')
 parser.add_argument('--epochs', default=500, type=int, metavar='N',
                     help='number of total epochs to run')
-parser.add_argument('--batch-size', default=512, type=int, metavar='N',
+parser.add_argument('--batch-size', default=1024, type=int, metavar='N',
                     help='mini-batch size')
 parser.add_argument('--learning-rate-weights', default=0.2, type=float, metavar='LR',
                     help='base learning rate for weights')
@@ -41,6 +42,7 @@ parser.add_argument('--print-freq', default=100, type=int, metavar='N',
                     help='print frequency')
 parser.add_argument('--checkpoint-dir', default='./checkpoint/', type=Path,
                     metavar='DIR', help='path to checkpoint directory')
+parser.add_argument('--load-model',default=True,type=bool)
 
 # logger = logging.getLogger(__name__)
 logger=init_logger()
@@ -58,27 +60,46 @@ def main():
     # print('building the model')
     model = BarlowTwins(args)
     # automatically resume from checkpoint if it exists
-    param_weights = []
-    param_biases = []
-    for param in model.parameters():
-        if param.ndim == 1:
-            param_biases.append(param)
-        else:
-            param_weights.append(param)
-    parameters = [{'params': param_weights}, {'params': param_biases}]
-    optimizer = LARS(parameters, lr=0, weight_decay=args.weight_decay,
-                     weight_decay_filter=exclude_bias_and_norm,
-                     lars_adaptation_filter=exclude_bias_and_norm)
+
 
     start_epoch=0
-    if (args.checkpoint_dir / 'checkpoint.ckpt').is_file():
+    if args.load_model and (args.checkpoint_dir / 'checkpoint.pth').is_file():
         logger.info(f'loading the model to continue training.....')
-        ckpt = torch.load(args.checkpoint_dir / 'checkpoint.ckpt',
+        ckpt = torch.load(args.checkpoint_dir / 'checkpoint.pth',
                           map_location='cpu')
         start_epoch = ckpt['epoch']
         model.load_state_dict(ckpt['model'])
-        optimizer.load_state_dict(ckpt['optimizer'])
 
+        param_weights = []
+        param_biases = []
+        for param in model.parameters():
+            if param.ndim == 1:
+                param_biases.append(param)
+            else:
+                param_weights.append(param)
+        parameters = [{'params': param_weights}, {'params': param_biases}]
+
+        optimizer = optim.SGD(parameters, lr=1e-3,
+                                momentum=0.9, weight_decay=5e-4)
+        optimizer.load_state_dict(ckpt['optimizer'])
+    else:
+      param_weights = []
+      param_biases = []
+      for param in model.parameters():
+          if param.ndim == 1:
+              param_biases.append(param)
+          else:
+              param_weights.append(param)
+      parameters = [{'params': param_weights}, {'params': param_biases}]
+      optimizer = optim.SGD(parameters, lr=1e-3,
+                                momentum=0.9, weight_decay=5e-4)
+
+
+
+    # optimizer = LARS(parameters, lr=0, weight_decay=args.weight_decay,
+    #                  weight_decay_filter=exclude_bias_and_norm,
+    #                  lars_adaptation_filter=exclude_bias_and_norm)
+    
     args.optimizer=optimizer
     args.continue_from=start_epoch
     args.model=model
@@ -162,11 +183,12 @@ def XLA_trainer(index, args):
 def train(model, epochs, train_loader, lambd, optimizer, device):
     # model.zero_grad()
     global_step=0
-    writer=SummaryWriter('logs/barlowtwins/tensorboarf')
+    writer=SummaryWriter(args.checkpoint_dir/'tensorboard')
     start_time = time.time()
-    early_stopping = EarlyStopping(patience=10, verbose=True ,path=args.checkpoint_dir/'checkpoint.ckpt' )
+    early_stopping = EarlyStopping(patience=10, verbose=True ,path=args.checkpoint_dir/'checkpoint.pth' )
     for epoch in range(args.continue_from, args.continue_from+epochs):
-        logger.info(f'[{xm.get_ordinal()}] device {device} , epoch {epoch+1}')
+        if xm.is_master_ordinal():
+            logger.info(f'[{xm.get_ordinal()}] device {device} , epoch {epoch+1}')
         epoch_loss=0
         epoch_start_time = time.time()
         model.train()
@@ -174,8 +196,8 @@ def train(model, epochs, train_loader, lambd, optimizer, device):
         #ParallelLoader, so each TPU core has unique batch
         para_train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
         step = epoch * len(para_train_loader)-1
-        loop=tqdm(para_train_loader , leave=False)
-        for ((x1, x2), _) in loop:#, start=epoch * len(para_train_loader)):
+        # loop=tqdm(para_train_loader , leave=False)
+        for ((x1, x2), _) in para_train_loader: #, start=epoch * len(para_train_loader)):
             step+=1
             # logger.info(f'[{xm.get_ordinal()}] device {device}, step {step} epoch {epoch} , x1 shape {x1.shape} , x2 shape {x2.shape}')
             optimizer.zero_grad()
@@ -183,7 +205,7 @@ def train(model, epochs, train_loader, lambd, optimizer, device):
             writer.add_scalar('ssloss',loss.item(),global_step=global_step)
             global_step+=1
             # logger.info(f'[{xm.get_ordinal()}] device {device}, done model forward✅✅✅')
-            lr_schedular(args, optimizer, para_train_loader, step)
+            # lr_schedular(args, optimizer, para_train_loader, step)
             # epoch_loss+=loss.item()
 
             loss.backward()
@@ -191,8 +213,8 @@ def train(model, epochs, train_loader, lambd, optimizer, device):
             # optimizer.step()
             xm.optimizer_step(optimizer)
 
-            loop.set_description(f'[{device}] epoch {epoch+1}/{epochs}')
-            loop.set_postfix(loss= loss.item())
+            # loop.set_description(f'[{device}] epoch {epoch+1}/{epochs}')
+            # loop.set_postfix(loss= loss.item())
 
             # logger.info(f'[{xm.get_ordinal()}] device {device}, done batch ✅✅✅')
             if xm.is_master_ordinal() and  step % args.print_freq == 0:
@@ -207,7 +229,7 @@ def train(model, epochs, train_loader, lambd, optimizer, device):
 
         # xm.save(state, args.checkpoint_dir/'checkpoint.ckpt', master_only=True, global_master=False)
         if xm.is_master_ordinal():
-           state = dict(epoch=epoch + 1, model=list(model.children())[0].state_dict(),
+           state = dict(epoch=epoch + 1, model=model.state_dict(),
                          optimizer=optimizer.state_dict())
            early_stopping(loss,state)
         if early_stopping.early_stop:
@@ -233,7 +255,7 @@ def lr_schedular(args, optimizer, loader, step):
         lr = base_lr * q + end_lr * (1 - q)
     optimizer.param_groups[0]['lr'] = lr * args.learning_rate_weights
     optimizer.param_groups[1]['lr'] = lr * args.learning_rate_biases
-
+    
 #LARS optimizer : the code is from the original implementation
 class LARS(optim.Optimizer):
     def __init__(self, params, lr, weight_decay=0, momentum=0.9, eta=0.001,

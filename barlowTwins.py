@@ -22,7 +22,7 @@ class BarlowTwins(nn.Module):
             layers.append( nn.Linear(fc_dims[i], fc_dims[i+1], bias=False) )
             layers.append(nn.BatchNorm1d(fc_dims[i+1]))
             layers.append(nn.ReLU())
-
+        
         layers.append(nn.Linear(fc_dims[-2], fc_dims[-1], bias=False))
         self.fc_prejector = nn.Sequential( *layers ) #[b x d]
         self.normalization = nn.BatchNorm1d(fc_dims[-1], affine=False)
