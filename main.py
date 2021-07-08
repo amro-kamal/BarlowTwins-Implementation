@@ -50,7 +50,7 @@ args=parser.parse_args()
 
  #TODO : save ad load the model and optimizer                   
 def main():
-    SEED=42
+    SEED=44
     torch.manual_seed(SEED)
     torch.cuda.manual_seed_all(SEED)
     # xm.set_rng_seed(SEED)
@@ -61,9 +61,21 @@ def main():
     model = BarlowTwins(args)
     # automatically resume from checkpoint if it exists
 
+    param_weights = []
+    param_biases = []
+    for param in model.parameters():
+        if param.ndim == 1:
+            param_biases.append(param)
+        else:
+            param_weights.append(param)
+    parameters = [{'params': param_weights}, {'params': param_biases}]
+    optimizer = optim.SGD(parameters, lr=1e-3,
+                              momentum=0.9, weight_decay=5e-4)
 
     start_epoch=0
-    if args.load_model and (args.checkpoint_dir / 'checkpoint.pth').is_file():
+    # logger.info(f'args.load_model {args.load_model==False}')
+    # logger.info(f'args.checkpoint_dir / checkpoint.pth.is_file() {(args.checkpoint_dir / 'checkpoint.pth').is_file()}')
+    if False and (args.checkpoint_dir / 'checkpoint.pth').is_file():
         logger.info(f'loading the model to continue training.....')
         ckpt = torch.load(args.checkpoint_dir / 'checkpoint.pth',
                           map_location='cpu')
@@ -82,23 +94,12 @@ def main():
         optimizer = optim.SGD(parameters, lr=1e-3,
                                 momentum=0.9, weight_decay=5e-4)
         optimizer.load_state_dict(ckpt['optimizer'])
-    else:
-      param_weights = []
-      param_biases = []
-      for param in model.parameters():
-          if param.ndim == 1:
-              param_biases.append(param)
-          else:
-              param_weights.append(param)
-      parameters = [{'params': param_weights}, {'params': param_biases}]
-      optimizer = optim.SGD(parameters, lr=1e-3,
-                                momentum=0.9, weight_decay=5e-4)
 
 
 
-    # optimizer = LARS(parameters, lr=0, weight_decay=args.weight_decay,
-    #                  weight_decay_filter=exclude_bias_and_norm,
-    #                  lars_adaptation_filter=exclude_bias_and_norm)
+    optimizer = LARS(parameters, lr=0, weight_decay=args.weight_decay,
+                     weight_decay_filter=exclude_bias_and_norm,
+                     lars_adaptation_filter=exclude_bias_and_norm)
     
     args.optimizer=optimizer
     args.continue_from=start_epoch
@@ -169,9 +170,10 @@ def XLA_trainer(index, args):
     # Creates dataloaders, which load data in batches
     # Note: test loader is not shuffled or sampled
     # logger.info(f'[{xm.get_ordinal()}] device {device} creating the dataloader')
+    logger.info(f'batch size {args.batch_size}')
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
-        batch_size=16,
+        batch_size=args.batch_size,
         sampler=train_sampler,
         num_workers=args.workers,
         drop_last=True)
@@ -205,7 +207,7 @@ def train(model, epochs, train_loader, lambd, optimizer, device):
             writer.add_scalar('ssloss',loss.item(),global_step=global_step)
             global_step+=1
             # logger.info(f'[{xm.get_ordinal()}] device {device}, done model forward✅✅✅')
-            # lr_schedular(args, optimizer, para_train_loader, step)
+            lr_schedular(args, optimizer, para_train_loader, step)
             # epoch_loss+=loss.item()
 
             loss.backward()
@@ -217,14 +219,14 @@ def train(model, epochs, train_loader, lambd, optimizer, device):
             # loop.set_postfix(loss= loss.item())
 
             # logger.info(f'[{xm.get_ordinal()}] device {device}, done batch ✅✅✅')
-            if xm.is_master_ordinal() and  step % args.print_freq == 0:
-                logger.info(f'epoch={epoch+1}') #, step={step}, lr_weights={optimizer.param_groups[0]['lr']}, lr_biases={optimizer.param_groups[1]['lr']}, loss={loss.item()}, time={int(time.time() - start_time)}')
+            # if xm.is_master_ordinal() and  step % args.print_freq == 0:
+            #     logger.info(f'epoch={epoch+1}') #, step={step}, lr_weights={optimizer.param_groups[0]['lr']}, lr_biases={optimizer.param_groups[1]['lr']}, loss={loss.item()}, time={int(time.time() - start_time)}')
 
         # logger.info(f'[{xm.get_ordinal()}] device {device}, epoch {epoch+1}: loss= {epoch_loss}')
 
         #saving the model   
         if xm.is_master_ordinal():
-            logger.info(f'epoch {epoch+1} ended loss : {loss.item()}, time: {int(time.time() - epoch_start_time)} saving the model.....🤪🤪🤪🤪🤪🤪🤪')
+            logger.info(f'epoch {epoch+1} ended loss : {loss.item()}, time: {int(time.time() - epoch_start_time)}, global steps: {global_step}')
        # torch.save(model.state_dict(),args.checkpoint_dir/'resnet50')
 
         # xm.save(state, args.checkpoint_dir/'checkpoint.ckpt', master_only=True, global_master=False)
