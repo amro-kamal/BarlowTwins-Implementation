@@ -69,7 +69,7 @@ def main():
         else:
             param_weights.append(param)
     parameters = [{'params': param_weights}, {'params': param_biases}]
-    optimizer = optim.SGD(parameters, lr=1e-3,
+    optimizer = optim.SGD(parameters, lr=1e-5,
                               momentum=0.9, weight_decay=5e-4)
 
     start_epoch=0
@@ -97,9 +97,9 @@ def main():
 
 
 
-    optimizer = LARS(parameters, lr=0, weight_decay=args.weight_decay,
-                     weight_decay_filter=exclude_bias_and_norm,
-                     lars_adaptation_filter=exclude_bias_and_norm)
+    # optimizer = LARS(parameters, lr=0, weight_decay=args.weight_decay,
+    #                  weight_decay_filter=exclude_bias_and_norm,
+    #                  lars_adaptation_filter=exclude_bias_and_norm)
     
     args.optimizer=optimizer
     args.continue_from=start_epoch
@@ -207,7 +207,7 @@ def train(model, epochs, train_loader, lambd, optimizer, device):
             writer.add_scalar('ssloss',loss.item(),global_step=global_step)
             global_step+=1
             # logger.info(f'[{xm.get_ordinal()}] device {device}, done model forward✅✅✅')
-            lr_schedular(args, optimizer, para_train_loader, step)
+            # lr_schedular(args, optimizer, para_train_loader, step)
             # epoch_loss+=loss.item()
 
             loss.backward()
