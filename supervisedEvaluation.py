@@ -23,7 +23,7 @@ logger = init_logger('eval.log')
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
 
-parser.add_argument('pretrained', type=Path, metavar='FILE',
+parser.add_argument('--pretrained', default='../gdrive/MyDrive/BarlowTwins/checkpoint/resnet.pth', type=Path, metavar='FILE',
                     help='path to pretrained model')
 parser.add_argument('--data',default='evaldata', type=Path, metavar='CIFAR10',
                     help='path to dataset')
@@ -35,9 +35,9 @@ parser.add_argument('--train-percent', default=100, type=int,
                     help='size of traing set in percent')
 parser.add_argument('--workers', default=8, type=int, metavar='N',
                     help='number of data loader workers')
-parser.add_argument('--epochs', default=100, type=int, metavar='N',
+parser.add_argument('--epochs', default=20, type=int, metavar='N',
                     help='number of total epochs to run')
-parser.add_argument('--batch-size', default=16, type=int, metavar='N',
+parser.add_argument('--batch-size', default=128, type=int, metavar='N',
                     help='mini-batch size')
 parser.add_argument('--lr-backbone', default=0.0, type=float, metavar='LR',
                     help='backbone base learning rate')
@@ -47,7 +47,7 @@ parser.add_argument('--weight-decay', default=1e-6, type=float, metavar='W',
                     help='weight decay')
 parser.add_argument('--print-freq', default=100, type=int, metavar='N',
                     help='print frequency')
-parser.add_argument('--checkpoint-dir', default='./checkpoint/resnet50_finetuned/', type=Path,
+parser.add_argument('--checkpoint-dir', default='./checkpoint/', type=Path,
                     metavar='DIR', help='path to checkpoint directory')
 
 
@@ -84,7 +84,11 @@ def XLA_trainer(index, args):
 
 
     model = torchvision.models.resnet50(pretrained=False)
-    state_dict = torch.load(args.pretrained, map_location='cpu')['model']
+    print('cnn backbone loaded')
+    state_dict = torch.load(args.pretrained, map_location='cpu')
+    # print('ckpt',ckpt)
+    # state_dict=ckpt['model']
+
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
     logger.info(f'missing keys {missing_keys} , unexpected_keys {unexpected_keys}')
     assert missing_keys == ['fc.weight', 'fc.bias'] and unexpected_keys == []
@@ -109,7 +113,7 @@ def XLA_trainer(index, args):
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs)
 
     # automatically resume from checkpoint if it exists
-    if (args.checkpoint_dir / 'checkpoint.pth').is_file():
+    if False and (args.checkpoint_dir / 'checkpoint.pth').is_file():
         ckpt = torch.load(args.checkpoint_dir / 'checkpoint.pth',
                           map_location='cpu')
         start_epoch = ckpt['epoch']
@@ -196,7 +200,8 @@ def XLA_trainer(index, args):
     start_time = time.time()
     model.to(device)
     for epoch in range(start_epoch, args.epochs):
-        logger.info(f'epoch {epoch+1}')
+        if xm.is_master_ordinal():
+            logger.info(f'epoch {epoch+1}')
         # train
         if args.weights == 'finetune':
             model.train()
@@ -207,9 +212,9 @@ def XLA_trainer(index, args):
         # train_sampler.set_epoch(epoch)
         para_train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
         for step, (images, target) in enumerate(para_train_loader, start=epoch * len(train_loader)):
-            logger.info(f'batch shape {images.shape}')
+            # logger.info(f'batch shape {images.shape}')
             output = model(images)
-            logger.info(f'output shape {output.shape}')
+            # logger.info(f'output shape {output.shape}')
             loss = criterion(output, target)
             optimizer.zero_grad()
             loss.backward()
@@ -233,19 +238,47 @@ def XLA_trainer(index, args):
             top1 = AverageMeter('Acc@1')
             top5 = AverageMeter('Acc@5')
 
+            # para_val_loader = pl.ParallelLoader(val_loader, [device]).per_device_loader(device)
+            # with torch.no_grad():
+            #     for images, target in para_val_loader:
+            #         output = model(images)
+            #         #batch accuracy
+            #         acc1, acc5 = accuracy(output, target, topk=(1, 5)) 
+            #         # acc1, acc5 = accuracy(output, target.cuda(gpu, non_blocking=True), topk=(1, 5))
+            #         top1.update(acc1[0].item(), images.size(0))
+            #         top5.update(acc5[0].item(), images.size(0))
+            
+            # best_acc.top1 = max(best_acc.top1, top1.avg)
+            # best_acc.top5 = max(best_acc.top5, top5.avg)
+            # stats = dict(epoch=epoch, acc1=top1.avg, acc5=top5.avg, best_acc1=best_acc.top1, best_acc5=best_acc.top5)
+            # # print(json.dumps(stats))
+            # # print(json.dumps(stats), file=stats_file)
+            # print('top1 top5',best_acc.top1,best_acc.top5)
+
+  ################################
+
+            model.eval()
+            correct = 0
+            print(f'----- Model Evaluation on {device}-----')
+            # We do not need to maintain intermediate activations while testing.
+
             para_val_loader = pl.ParallelLoader(val_loader, [device]).per_device_loader(device)
             with torch.no_grad():
-                for images, target in val_loader:
+                for images, target in para_val_loader:                  
+                    # Forward pass.
                     output = model(images)
-                    #batch accuracy
-                    acc1, acc5 = accuracy(output, target.cuda(gpu, non_blocking=True), topk=(1, 5))
-                    top1.update(acc1[0].item(), images.size(0))
-                    top5.update(acc5[0].item(), images.size(0))
-            best_acc.top1 = max(best_acc.top1, top1.avg)
-            best_acc.top5 = max(best_acc.top5, top5.avg)
-            stats = dict(epoch=epoch, acc1=top1.avg, acc5=top5.avg, best_acc1=best_acc.top1, best_acc5=best_acc.top5)
-            print(json.dumps(stats))
-            print(json.dumps(stats), file=stats_file)
+                    
+                    # Get the label corresponding to the highest predicted probability.
+                    preds = output.argmax(dim=1, keepdim=True) #[bs x 1]
+                    
+                    # Count number of correct predictions.
+                    correct += preds.cpu().eq(target.view_as(preds)).sum().item()
+            model.train()
+            # Print test accuracy.
+            percent = 100. * correct / len(para_val_loader.sampler)
+            print(f'validation accuracy: {correct} / {len(data_loader.sampler)} ({percent:.0f}%)')
+
+  ################################
 
         # sanity check
         if args.weights == 'freeze':
@@ -259,7 +292,7 @@ def XLA_trainer(index, args):
             state = dict(
                 epoch=epoch + 1, best_acc=best_acc, model=model.state_dict(),
                 optimizer=optimizer.state_dict(), scheduler=scheduler.state_dict())
-            torch.save(state, args.checkpoint_dir / 'checkpoint.pth')
+            torch.save(state, args.checkpoint_dir / 'finetuned_resnet.pth')
 
 # def train(model, epochs, train_loader, lambd, optimizer, device):
 #     model.zero_grad()
