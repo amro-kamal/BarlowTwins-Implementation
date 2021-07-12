@@ -23,11 +23,11 @@ logger = init_logger('eval.log')
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
 
-parser.add_argument('--pretrained', default='../gdrive/MyDrive/BarlowTwins/checkpoint/resnet.pth', type=Path, metavar='FILE',
+parser.add_argument('--cnn-path', default='../gdrive/MyDrive/BarlowTwins/checkpoint/resnet.pth', type=Path, metavar='FILE',
                     help='path to pretrained model')
 parser.add_argument('--data',default='evaldata', type=Path, metavar='CIFAR10',
                     help='path to dataset')
-parser.add_argument('--weights', default='finetune', type=str,
+parser.add_argument('--weights', default='freeze', type=str,
                     choices=('finetune', 'freeze'),
                     help='finetune or freeze resnet weights')
 parser.add_argument('--train-percent', default=100, type=int,
@@ -35,9 +35,9 @@ parser.add_argument('--train-percent', default=100, type=int,
                     help='size of traing set in percent')
 parser.add_argument('--workers', default=8, type=int, metavar='N',
                     help='number of data loader workers')
-parser.add_argument('--epochs', default=20, type=int, metavar='N',
+parser.add_argument('--epochs', default=50, type=int, metavar='N',
                     help='number of total epochs to run')
-parser.add_argument('--batch-size', default=128, type=int, metavar='N',
+parser.add_argument('--batch-size', default=64, type=int, metavar='N',
                     help='mini-batch size')
 parser.add_argument('--lr-backbone', default=0.0, type=float, metavar='LR',
                     help='backbone base learning rate')
@@ -55,6 +55,7 @@ parser.add_argument('--checkpoint-dir', default='./checkpoint/', type=Path,
 args=parser.parse_args()                
 def main():
     args.rank=0
+    args.seed=42
     
     start_time = time.time()
 
@@ -64,36 +65,44 @@ def main():
 
 SERIAL_EXEC = xmp.MpSerialExecutor()
 def XLA_trainer(index, args):
+
+    def test_loop_fn(val_loader):
+        total_samples = 0
+        correct = 0
+        para_val_loader = pl.ParallelLoader(val_loader, [device]).per_device_loader(device)
+        for data, target in para_val_loader:
+          output = model(data)
+          pred = output.max(1, keepdim=True)[1]
+          correct += pred.eq(target.view_as(pred)).sum().item()
+          total_samples += data.size()[0]
+
+        accuracy = 100.0 * correct / total_samples
+        print('[xla:{}] Accuracy={:.2f}%'.format(
+            xm.get_ordinal(), accuracy), flush=True)
+        return accuracy, data, pred, target
+
     args.rank = index
     '''
     1-create sampler
     2-create dataloader
     3-call train() function
     '''
-    print('starting xla traininer')
-    # Sets a common random seed - both for initialization and ensuring graph is the same
-    # torch.manual_seed(args.seed)
-    # print('setting seed')
-    # Acquires the (unique) Cloud TPU core corresponding to this process's index
+    if xm.is_master_ordinal:
+      logger.info('starting xla traininer')
+
+    torch.manual_seed(args.seed)
     device = xm.xla_device()  
-    logger.info(f'Training will start on {device}')
-    print(f'Training will start on {device}')
-    # Downloads train and test datasets
-    # Note: master goes first and downloads the dataset only once (xm.rendezvous)
-    #   all the other workers wait for the master to be done downloading.
-
-
+   
     model = torchvision.models.resnet50(pretrained=False)
-    print('cnn backbone loaded')
-    state_dict = torch.load(args.pretrained, map_location='cpu')
-    # print('ckpt',ckpt)
-    # state_dict=ckpt['model']
+    state_dict = torch.load(args.cnn_path, map_location='cpu')
 
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-    logger.info(f'missing keys {missing_keys} , unexpected_keys {unexpected_keys}')
+    if xm.is_master_ordinal():
+      logger.info(f'missing keys {missing_keys} , unexpected_keys {unexpected_keys}')
     assert missing_keys == ['fc.weight', 'fc.bias'] and unexpected_keys == []
-    model.fc.weight.data.normal_(mean=0.0, std=0.01)
-    model.fc.bias.data.zero_()
+    model.fc=nn.Linear(2048,10)
+    # model.fc.weight.data.normal_(mean=0.0, std=0.01)
+    # model.fc.bias.data.zero_()
     if args.weights == 'freeze':
         model.requires_grad_(False)
         model.fc.requires_grad_(True)
@@ -109,8 +118,8 @@ def XLA_trainer(index, args):
     param_groups = [dict(params=classifier_parameters, lr=args.lr_classifier)]
     if args.weights == 'finetune':
         param_groups.append(dict(params=model_parameters, lr=args.lr_backbone))
-    optimizer = optim.SGD(param_groups, 0, momentum=0.9, weight_decay=args.weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs)
+    optimizer = optim.SGD(model.parameters(), 0.002, momentum=0.9, weight_decay=args.weight_decay)
+    # scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs)
 
     # automatically resume from checkpoint if it exists
     if False and (args.checkpoint_dir / 'checkpoint.pth').is_file():
@@ -131,11 +140,9 @@ def XLA_trainer(index, args):
 
 
     def get_data():
-      # if not xm.is_master_ordinal():
-      #     xm.rendezvous('download_only_once')
-      
-      logger.info('Downloading the data.......')
 
+      if xm.is_master_ordinal():
+        logger.info('Downloading the data.......')
       train_dataset = datasets.CIFAR10(
           "/data/train",
           train=True,
@@ -147,7 +154,6 @@ def XLA_trainer(index, args):
                     mean=(0.4914, 0.4822, 0.4465), std=(0.2023, 0.1994, 0.2010))])
       )
           
-
       val_dataset = datasets.CIFAR10(
           "/data/val",
           train=False,
@@ -163,23 +169,18 @@ def XLA_trainer(index, args):
   
       return train_dataset , val_dataset
 
-      # if  xm.is_master_ordinal():
-      #     xm.rendezvous('download_only_once')
 
     train_dataset ,val_dataset =SERIAL_EXEC.run(get_data)
 
     
-    print('creating the sampler')
     train_sampler = torch.utils.data.distributed.DistributedSampler(
         train_dataset,
         num_replicas=xm.xrt_world_size(),
         rank=xm.get_ordinal(),
         shuffle=True)
-    print('sampler created ✅')
 
     # Creates dataloaders, which load data in batches
     # Note: test loader is not shuffled or sampled
-    print('creating the dataloader')
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -192,107 +193,120 @@ def XLA_trainer(index, args):
     batch_size=args.batch_size,
     num_workers=args.workers,
     drop_last=True)
-    print('dataloader is ready ✅')
 
 
-    # train(model.to(device), args.epochs, train_loader, args.lambd, args.optimizer ,device)
 
     start_time = time.time()
     model.to(device)
     for epoch in range(start_epoch, args.epochs):
         if xm.is_master_ordinal():
             logger.info(f'epoch {epoch+1}')
-        # train
-        if args.weights == 'finetune':
-            model.train()
-        elif args.weights == 'freeze':
-            model.eval()
-        else:
-            assert False
-        # train_sampler.set_epoch(epoch)
+        optimizer = optim.SGD(model.parameters(), 0.0001, momentum=0.9, weight_decay=args.weight_decay)
+
+        model.train()
+
+        #train
         para_train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
         for step, (images, target) in enumerate(para_train_loader, start=epoch * len(train_loader)):
-            # logger.info(f'batch shape {images.shape}')
             output = model(images)
-            # logger.info(f'output shape {output.shape}')
             loss = criterion(output, target)
             optimizer.zero_grad()
             loss.backward()
             xm.optimizer_step(optimizer)  # Note: barrier=True not needed when using ParallelLoader 
-            if step % args.print_freq == 0:
-                xm.all_reduce('sum' , loss.div_(len(xm.get_xla_supported_devices())))
-                # # if args.rank == 0:
-                if xm.is_master_ordinal():
-                    pg = optimizer.param_groups
-                    lr_classifier = pg[0]['lr']
-                    lr_backbone = pg[1]['lr'] if len(pg) == 2 else 0
-                    stats = dict(epoch=epoch, step=step, lr_backbone=lr_backbone,
-                                 lr_classifier=lr_classifier, loss=loss.item(),
-                                 time=int(time.time() - start_time))
-                    print(json.dumps(stats))
+            # if xm.is_master_ordinal():
+            #   print('sum ',torch.sum(model.state_dict()['fc.weight']))
+          
+            # if step % args.print_freq == 0:
+            #     # xm.all_reduce('sum' , loss.div_(len(xm.get_xla_supported_devices())))
+            #     # # if args.rank == 0:
+            #     if xm.is_master_ordinal():
+            #         pg = optimizer.param_groups
+            #         lr_classifier = pg[0]['lr']
+            #         lr_backbone = pg[1]['lr'] if len(pg) == 2 else 0
+            #         stats = dict(epoch=epoch, step=step, lr_backbone=lr_backbone,
+            #                      lr_classifier=lr_classifier, loss=loss.item(),
+            #                      time=int(time.time() - start_time))
+            #         print(json.dumps(stats))
                     # print(json.dumps(stats), file=stats_file)
 
         # evaluate
+        # if xm.is_master_ordinal():
+        # top1 = AverageMeter('Acc@1')
+        # top5 = AverageMeter('Acc@5')
+
+        # para_val_loader = pl.ParallelLoader(val_loader, [device]).per_device_loader(device)
+        # with torch.no_grad():
+        #     for images, target in para_val_loader:
+        #         output = model(images)
+        #         #batch accuracy
+        #         acc1, acc5 = accuracy(output, target, topk=(1, 5)) 
+        #         # acc1, acc5 = accuracy(output, target.cuda(gpu, non_blocking=True), topk=(1, 5))
+        #         top1.update(acc1[0].item(), images.size(0))
+        #         top5.update(acc5[0].item(), images.size(0))
+        
+        # best_acc.top1 = max(best_acc.top1, top1.avg)
+        # best_acc.top5 = max(best_acc.top5, top5.avg)
+        # stats = dict(epoch=epoch, acc1=top1.avg, acc5=top5.avg, best_acc1=best_acc.top1, best_acc5=best_acc.top5)
+        # # print(json.dumps(stats))
+        # # print(json.dumps(stats), file=stats_file)
+        # print('top1 top5',best_acc.top1,best_acc.top5)
+        print(f'loss {loss}')
+################################
+
         model.eval()
-        if args.rank == 0:
-            top1 = AverageMeter('Acc@1')
-            top5 = AverageMeter('Acc@5')
+        if xm.is_master_ordinal:
+          logger.info(f'----- Model Evaluation on {device}-----')
+        # We do not need to maintain intermediate activations while testing.
 
-            # para_val_loader = pl.ParallelLoader(val_loader, [device]).per_device_loader(device)
-            # with torch.no_grad():
-            #     for images, target in para_val_loader:
-            #         output = model(images)
-            #         #batch accuracy
-            #         acc1, acc5 = accuracy(output, target, topk=(1, 5)) 
-            #         # acc1, acc5 = accuracy(output, target.cuda(gpu, non_blocking=True), topk=(1, 5))
-            #         top1.update(acc1[0].item(), images.size(0))
-            #         top5.update(acc5[0].item(), images.size(0))
-            
-            # best_acc.top1 = max(best_acc.top1, top1.avg)
-            # best_acc.top5 = max(best_acc.top5, top5.avg)
-            # stats = dict(epoch=epoch, acc1=top1.avg, acc5=top5.avg, best_acc1=best_acc.top1, best_acc5=best_acc.top5)
-            # # print(json.dumps(stats))
-            # # print(json.dumps(stats), file=stats_file)
-            # print('top1 top5',best_acc.top1,best_acc.top5)
+        # para_val_loader = pl.ParallelLoader(val_loader, [device]).per_device_loader(device)
+        # with torch.no_grad():
+        #     for images, target in para_val_loader:                  
+        #         output = model(images)
+        #         logger.info('output........')
+        #         preds = output.argmax(dim=1, keepdim=True) #[bs x 1]
+        #         logger.info('predict........')
+        #         # Count number of correct predictions.
+        #         correct += preds.eq(target.view_as(preds)).sum().item()
+        #         logger.info('correct ',correct)
+        total_samples = 0
+        correct = 0
+        para_val_loader = pl.ParallelLoader(val_loader, [device]).per_device_loader(device)
+        for data, target in para_val_loader:
+          output = model(data)
+          # print(output.shape)
+          # pred = output.max(1, keepdim=True)[1]
+          pred = output.argmax(dim=1, keepdim=True) #[bs x 1]
+          # print(f'pred shape {pred.shape} , target shape {target.shape} , pred=target {pred.eq(target.view_as(pred)).sum().item()}')
 
-  ################################
+          correct += pred.eq(target.view_as(pred)).sum().item()
+          total_samples += data.size()[0]
 
-            model.eval()
-            correct = 0
-            print(f'----- Model Evaluation on {device}-----')
-            # We do not need to maintain intermediate activations while testing.
-
-            para_val_loader = pl.ParallelLoader(val_loader, [device]).per_device_loader(device)
-            with torch.no_grad():
-                for images, target in para_val_loader:                  
-                    # Forward pass.
-                    output = model(images)
-                    
-                    # Get the label corresponding to the highest predicted probability.
-                    preds = output.argmax(dim=1, keepdim=True) #[bs x 1]
-                    
-                    # Count number of correct predictions.
-                    correct += preds.cpu().eq(target.view_as(preds)).sum().item()
-            model.train()
-            # Print test accuracy.
-            percent = 100. * correct / len(para_val_loader.sampler)
-            print(f'validation accuracy: {correct} / {len(data_loader.sampler)} ({percent:.0f}%)')
-
+        accuracy = 100.0 * correct / total_samples
+        print(f'correct {correct}, total {total_samples}')
+        print('[xla:{}] Accuracy={:.2f}%'.format(
+            xm.get_ordinal(), accuracy), flush=True)
+        model.train()
+        # Print test accuracy.
+        # percent = 100. * correct / len(para_val_loader.sampler)
+        # print(f'validation accuracy: {correct} / {len(data_loader.sampler)} ({percent:.0f}%)')
   ################################
 
         # sanity check
-        if args.weights == 'freeze':
-            reference_state_dict = torch.load(args.pretrained, map_location='cpu')
-            model_state_dict = model.module.state_dict()
-            for k in reference_state_dict:
-                assert torch.equal(model_state_dict[k].cpu(), reference_state_dict[k]), k
+        # if args.weights == 'freeze':
+        #     reference_state_dict = torch.load(args.cnn_path, map_location='cpu')
+        #     model_state_dict = model.module.state_dict()
+        #     for k in reference_state_dict:
+        #         assert torch.equal(model_state_dict[k].cpu(), reference_state_dict[k]), k
 
-        scheduler.step()
-        if args.rank == 0:
-            state = dict(
-                epoch=epoch + 1, best_acc=best_acc, model=model.state_dict(),
-                optimizer=optimizer.state_dict(), scheduler=scheduler.state_dict())
-            torch.save(state, args.checkpoint_dir / 'finetuned_resnet.pth')
+        # scheduler.step()
+        # if args.rank == 0:
+        #     state = dict(
+        #         epoch=epoch + 1, best_acc=best_acc, model=model.state_dict(),
+        #         optimizer=optimizer.state_dict(), scheduler=scheduler.state_dict())
+        #     torch.save(state, args.checkpoint_dir / 'finetuned_resnet.pth')
+
+
+
 
 # def train(model, epochs, train_loader, lambd, optimizer, device):
 #     model.zero_grad()
