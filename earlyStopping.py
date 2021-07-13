@@ -1,10 +1,11 @@
 import numpy as np
 import torch
 import torch_xla.core.xla_model as xm
+from earlyStopping import EarlyStopping
 
 class EarlyStopping:
     """Early stops the training if validation loss doesn't improve after a given patience."""
-    def __init__(self, patience=7, verbose=False, delta=0, path='checkpoint.pt', trace_func=print):
+    def __init__(self, patience=7, verbose=False, delta=0, path='checkpoint.pt', trace_func=print,min_val_acc_to_save=0.0):
         """
         Args:
             patience (int): How long to wait after last time validation loss improved.
@@ -41,7 +42,8 @@ class EarlyStopping:
                 self.early_stop = True
         else:
             self.best_score = score
-            self.save_checkpoint(val_loss, state)
+            if score>min_val_acc_to_save:
+              self.save_checkpoint(val_loss, state)
             self.counter = 0
 
     def save_checkpoint(self, val_loss, state):
