@@ -11,7 +11,7 @@ The table contains the first result I got (without any hyperparameters tuning), 
 
 
 
-###Linear Classification evaluation: 
+### Linear Classification evaluation: 
 
 <img width="600" alt="Screen Shot 2021-07-14 at 18 36 39" src="https://user-images.githubusercontent.com/37993690/125674825-18c1ff1a-8040-4367-a371-eab3e0cd196d.png">
 
