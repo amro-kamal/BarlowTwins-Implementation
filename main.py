@@ -19,6 +19,9 @@ from torch.utils.tensorboard import SummaryWriter
 import time
 import math
 from torchsummary import summary
+from knn import knn_test
+from utils import cifar10_loader
+
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
 parser.add_argument('--data', type=str, default='CIFAR10',
@@ -47,8 +50,8 @@ parser.add_argument('--checkpoint-dir', default='./checkpoint/', type=Path,
 parser.add_argument('--load-model',default=False, type=bool)
 parser.add_argument('--print-model-summary', default=False, type=bool)
 
-logger=init_logger()
 args=parser.parse_args()
+logger=init_logger()
 
  #TODO : save ad load the model and optimizer                   
 def main():
@@ -124,7 +127,7 @@ def XLA_trainer(index, args):
     # if  xm.is_master_ordinal():
     #     xm.rendezvous('download_only_once')
 
-
+    
     device = xm.xla_device()  
     # Sets a common random seed - both for initialization and ensuring graph is the same
     torch.manual_seed(args.seed)
@@ -147,14 +150,15 @@ def XLA_trainer(index, args):
         num_workers=args.workers,
         drop_last=True)
     
-    train(args.model.to(device), args.epochs, train_loader, args.lambd ,device)
+    knn_train_loader, knn_val_loader  = cifar10_loader(64)
 
+    train(args.model.to(device), args.epochs, train_loader, args.lambd ,device, knn_train_loader, knn_val_loader)
 
-def train(model, epochs, train_loader, lambd, device):
+def train(model, epochs, train_loader, lambd, device, knn_train_loader, knn_val_loader):
     global_step=0
     writer=SummaryWriter(args.checkpoint_dir/'tensorboard')
     start_time = time.time()
-    early_stopping = EarlyStopping(patience=5, verbose=True ,path=args.checkpoint_dir/'checkpoint.pth' )
+    early_stopping = EarlyStopping(patience=1000, verbose=True ,path=args.checkpoint_dir/'checkpoint.pth' )
     if args.optimizer=='SGD':
       optimizer = optim.SGD(model.parameters(), lr=1e-3,
                               momentum=0.9, weight_decay=5e-4)
@@ -209,6 +213,10 @@ def train(model, epochs, train_loader, lambd, device):
             # if xm.is_master_ordinal():
             #    print('sum ',torch.sum(model.state_dict()['resnet_backbone.conv1.weight']))
           
+        val_acc = knn_test(model.children())[0], knn_train_loader, knn_val_loader, epoch, args)
+        if xm.is_master_ordinal:
+            writer.add_scalar('knn acc',val_acc,global_step=epoch)
+
        #saving the model if the loss dicreased  
         epoch_loss=epoch_loss/num_examples
         if xm.is_master_ordinal():

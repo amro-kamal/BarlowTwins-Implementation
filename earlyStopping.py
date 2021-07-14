@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 import torch_xla.core.xla_model as xm
-from earlyStopping import EarlyStopping
 
 class EarlyStopping:
     """Early stops the training if validation loss doesn't improve after a given patience."""
@@ -28,6 +27,7 @@ class EarlyStopping:
         self.delta = delta
         self.path = path
         self.trace_func = trace_func
+        self.min_val_acc_to_save=min_val_acc_to_save
     def __call__(self, val_loss, state):
 
         score = -val_loss
@@ -42,7 +42,7 @@ class EarlyStopping:
                 self.early_stop = True
         else:
             self.best_score = score
-            if score>min_val_acc_to_save:
+            if score>self.min_val_acc_to_save:
               self.save_checkpoint(val_loss, state)
             self.counter = 0
 
@@ -52,6 +52,7 @@ class EarlyStopping:
             self.trace_func(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving the model ...')
         # torch.save(model.state_dict(), self.path)
         if xm.is_master_ordinal():
+          state['best_val_acc']=self.best_score
           torch.save(state, self.path)#, master_only=True, global_master=False)
         print('model saved ✅✅')
 
