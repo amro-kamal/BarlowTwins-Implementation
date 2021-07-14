@@ -1,5 +1,5 @@
 # BarlowTwins-Implementation
-Pytorch/XLA mplementation for "Barlow Twins: Self-Supervised Learning via Redundancy Reduction" (not completed!)
+Pytorch/XLA mplementation for ["Barlow Twins: Self-Supervised Learning via Redundancy Reduction"](https://arxiv.org/pdf/2103.03230.pdf) 
 
 current results
 
