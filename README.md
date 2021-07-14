@@ -14,3 +14,7 @@ The table contains the first result I got (without any hyperparameters tuning), 
 <img width="971" alt="Screen Shot 2021-07-14 at 18 36 39" src="https://user-images.githubusercontent.com/37993690/125674825-18c1ff1a-8040-4367-a371-eab3e0cd196d.png">
 
 <img width="963" alt="Screen Shot 2021-07-14 at 18 36 56" src="https://user-images.githubusercontent.com/37993690/125674855-589659ed-54fd-4cdc-bc39-1fd2a4009e5a.png">
+
+
+<img width="963" alt="Screen Shot 2021-07-14 at 18 36 56" src="https://user-images.githubusercontent.com/37993690/125675969-475648c4-9027-4ede-b9ba-1a45bfd78026.png">
+<img width="870" alt="Screen Shot 2021-07-14 at 18 45 14" src="https://user-images.githubusercontent.com/37993690/125675984-67172688-b768-48e8-9730-a73347254312.png">
