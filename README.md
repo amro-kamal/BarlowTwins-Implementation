@@ -11,4 +11,6 @@ The table contains the first result I got (without any hyperparameters tuning), 
 
 
 
-Screen Shot 2021-07-14 at 15.57.11<img width="407" alt="Screen Shot 2021-07-14 at 15 57 11" src="https://user-images.githubusercontent.com/37993690/125674401-65162c25-8586-430b-b12d-1d341409574a.png">
+<img width="971" alt="Screen Shot 2021-07-14 at 18 36 39" src="https://user-images.githubusercontent.com/37993690/125674825-18c1ff1a-8040-4367-a371-eab3e0cd196d.png">
+
+<img width="963" alt="Screen Shot 2021-07-14 at 18 36 56" src="https://user-images.githubusercontent.com/37993690/125674855-589659ed-54fd-4cdc-bc39-1fd2a4009e5a.png">
