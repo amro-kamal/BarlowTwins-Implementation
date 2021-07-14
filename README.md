@@ -3,9 +3,9 @@ Pytorch/XLA mplementation for "Barlow Twins: Self-Supervised Learning via Redund
 
 current results
 
-Model        |  dataset    | linear_classifier test acc | knn classifier acc  |
------------- | ------------|    ------------------      |     ------------    |
-resnet18     | Cifar10     |         75.2%              |                     |
+Model        |  dataset    | linear_classifier test acc |   
+------------ | ------------|    ------------------      |    
+resnet18     | Cifar10     |         75.2%              |                     
  
 The table contains the first result I got (without any hyperparameters tuning), so the results can be improved. The resullts for resnet50 was not good (for the first try also), more experiments on resnet50 will be done 
 
