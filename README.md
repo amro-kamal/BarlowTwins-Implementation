@@ -15,7 +15,6 @@ The table contains the first result I got (without any hyperparameters tuning), 
 #global batch size =64*8=512
 !python BarlowTwins-Implementation/main.py --batch-size=64 \
                                            --checkpoint-dir=$model_path\
-                                           --load-model=False\
                                            --epochs=700
 
 ```
