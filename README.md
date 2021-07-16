@@ -16,6 +16,7 @@ Run the next command to train resnet18 on cifar10 data set on TPU. The code supp
 #global batch size =64*8=512
 !python BarlowTwins-Implementation/main.py --batch-size=64 \
                                            --checkpoint-dir=$model_path\
+                                           --projector='512-512-512'\
                                            --epochs=700
 
 ```
