@@ -23,37 +23,38 @@ class EarlyStopping:
         self.counter = 0
         self.best_score = None
         self.early_stop = False
-        self.val_loss_min = np.Inf
+        self.val_acc_max = np.Inf
         self.delta = delta
         self.path = path
         self.trace_func = trace_func
         self.min_val_acc_to_save=min_val_acc_to_save
-    def __call__(self, val_loss, state):
+    def __call__(self, val_acc, state):
 
-        score = -val_loss
+        score = val_acc
 
         if self.best_score is None:
             self.best_score = score
-            self.save_checkpoint(val_loss, state)
+            self.save_checkpoint(val_acc, state)
         elif score < self.best_score + self.delta:
             self.counter += 1
             self.trace_func(f'EarlyStopping counter: {self.counter} out of {self.patience}')
             if self.counter >= self.patience:
                 self.early_stop = True
         else:
+            print('hello from early stooping')
             self.best_score = score
             if score>self.min_val_acc_to_save:
-              self.save_checkpoint(val_loss, state)
+              self.save_checkpoint(val_acc, state)
             self.counter = 0
 
-    def save_checkpoint(self, val_loss, state):
-        '''Saves model when validation loss decrease.'''
+    def save_checkpoint(self, val_acc, state):
+        '''Saves model when validation acc increase.'''
         if self.verbose:
-            self.trace_func(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving the model ...')
+            self.trace_func(f'Validation acc decreased ({self.val_acc_max:.6f} --> {val_acc:.6f}).  Saving the model ...')
         # torch.save(model.state_dict(), self.path)
         if xm.is_master_ordinal():
           state['best_val_acc']=self.best_score
           torch.save(state, self.path)#, master_only=True, global_master=False)
         print('model saved ✅✅')
 
-        self.val_loss_min = val_loss
+        self.val_acc_max = val_acc

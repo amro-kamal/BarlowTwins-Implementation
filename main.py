@@ -213,9 +213,9 @@ def train(model, epochs, train_loader, lambd, device, knn_train_loader, knn_val_
             # if xm.is_master_ordinal():
             #    print('sum ',torch.sum(model.state_dict()['resnet_backbone.conv1.weight']))
           
-        val_acc = knn_test(model.children())[0], knn_train_loader, knn_val_loader, epoch, args)
-        if xm.is_master_ordinal:
-            writer.add_scalar('knn acc',val_acc,global_step=epoch)
+        # val_acc = knn_test(model.children())[0], knn_train_loader, knn_val_loader, epoch, args)
+        # if xm.is_master_ordinal:
+        #     writer.add_scalar('knn acc',val_acc,global_step=epoch)
 
        #saving the model if the loss dicreased  
         epoch_loss=epoch_loss/num_examples

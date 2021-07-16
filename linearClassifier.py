@@ -3,23 +3,27 @@ import torch
 import torch.nn as nn
 import torchvision
 import torchvision.transforms as transforms
-# from tqdm.notebook import tqdm
+# import tqdm
+from tqdm.notebook import tqdm
 import os
 import logging
 from logging import getLogger, INFO, FileHandler,  Formatter,  StreamHandler
 from earlyStopping import EarlyStopping
+from tqdm.notebook import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
+#TODO
+#check predict function
+#check LC_dataset function
 cfg={
 'criterion' : torch.nn.CrossEntropyLoss(),
-'val_period' : 2,
-'epochs' : 10,
-'batch_size': 64,
+'val_period' : 5,
+'epochs' : 200,
+'batch_size': 512,
 'accumulation_steps' : 1,
-'ckpt_path' : '../gdrive/MyDrive/BarlowTwins/checkpoint/resnet_550.pth' ,
-'patience' : 100,
+'ckpt_path' : '' ,
 'load_model' : False, 
-'load_path' : '../gdrive/MyDrive/BarlowTwins/checkpoint/resnet_550.pth',
+'load_path' : '../gdrive/MyDrive/BarlowTwins/checkpoint/renet18/selfsupervised/resnet.pth',
 'min_val_acc_to_save' : 30.0,
 'gpu' : True,
 'min_val_acc_to_save':0,
@@ -39,9 +43,19 @@ def predict(model, test_loader,device):
         for images, targets in tqdm(test_loader):
             # Forward pass.
             output = model(images.to(device)) #[bs x out_dim]
+            # print(output.shape)
+            # Get the label corresponding to the highest predicted probability.
+            # print(output.argmax(dim=1, keepdim=True).shape)
             preds+= (output.cpu()) #[bs x 1]
+            # print(f'output.shape {output.shape}')
             labels+=targets
-
+            # print('preds',torch.tensor(preds).shape)
+    #TODO
+    #convert to list
+    # for i,p in enumerate(preds):
+    #   preds[i]=preds[i].item()
+    # print(f'preds [0] shape {preds[0]}')
+    # return torch.tensor(preds,dtype=torch.float32) , torch.tensor(labels,dtype=torch.float32)
     return preds , labels
 class LC_Dataset(Dataset):
     def __init__(self, features, labels):
@@ -88,7 +102,7 @@ def train_linear_classifer(cfg):
     """ 
     if cfg['gpu']:
       device=torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-    backbone_model = torchvision.models.resnet50(pretrained=False)
+    backbone_model = torchvision.models.resnet18(pretrained=False)
     print('Loading the backbone model from ckpt.....')
     state_dict=torch.load(cfg['load_path'])
     missing_keys, unexpected_keys = backbone_model.load_state_dict(state_dict, strict=False)
@@ -101,29 +115,30 @@ def train_linear_classifer(cfg):
     #get cifar10 dataset
     cifar10_train_loader, cifar10_val_loader=cifar10_loader(batch_size=cfg['batch_size'])
     #get the 2048-dim features from the model
-    train_features, train_labels = predict(backbone_model , cifar10_val_loader ,device)
+    train_features, train_labels = predict(backbone_model , cifar10_train_loader ,device)
     # print(f'train_features shape {train_features.shape}')
     LC_train_dataset = LC_Dataset(train_features, train_labels)
     LC_train_loader = DataLoader(LC_train_dataset,batch_size=cfg['batch_size'],shuffle=True,num_workers=2)
-
+   
     val_features, val_labels=predict(backbone_model,cifar10_val_loader,device)
     LC_val_dataset=LC_Dataset(val_features, val_labels)
     LC_val_loader=DataLoader(LC_val_dataset,batch_size=cfg['batch_size'],shuffle=True,num_workers=2)
-    #delete the model to free the GPU memory
     del backbone_model
 
-    #create the linear classifier
-    linear_classifer=nn.Sequential(nn.Linear(2048,10))
-    # Move linear_classifer to the device (CPU or GPU).
-    linear_classifer.to(device)
+    print(f'train data {len(train_features)} examples')
+    print(f'val data {len(val_features)} examples')
 
-    #create the opytimizer and scheduler
+    linear_classifer=nn.Sequential(nn.Linear(512,10))
     cfg['optimizer'] = torch.optim.SGD(linear_classifer.parameters(), lr=1e-3, momentum=0.9, weight_decay=5e-4)
     optimizer=torch.optim.SGD(linear_classifer.parameters(), lr=1e-3, momentum=0.9, weight_decay=5e-4)
     # cfg['scheduler'] = torch.optim.lr_scheduler.StepLR(cfg['optimizer'], step_size=3, gamma=0.1),
     cfg['scheduler'] = None
-    cfg['optimizer'].zero_grad()
+    best_val_acc=0
+    linear_classifer.train()
 
+    # Move linear_classifer to the device (CPU or GPU).
+    #TODO: check if we need to remove the backbone model from the GPU
+    linear_classifer.to(device)
     
     # Exponential moving average of the loss.
     ema_loss = None
@@ -131,7 +146,7 @@ def train_linear_classifer(cfg):
     train_accs=[]
     val_accs=[]
     writer=SummaryWriter(os.path.join(cfg['ckpt_path']+'tensorboard'))
-    early_stopping = EarlyStopping(patience=cfg['patience'], verbose=True , path=os.path.join(cfg['ckpt_path']+'/linear_classifier.ckpt'),min_val_acc_to_save=cfg['min_val_acc_to_save'] )
+    # early_stopping = EarlyStopping(patience=5, verbose=True , path=os.path.join(cfg['ckpt_path']+'/checkpoint.ckpt'),min_val_acc_to_save=cfg['min_val_acc_to_save'] )
 
     print(f'----- Training on {device} -----')
     # Loop over epochs.
@@ -139,21 +154,25 @@ def train_linear_classifer(cfg):
         print(f'epoch {epoch+1}')
         correct = 0
         num_examples=0
-        linear_classifer.train()
         # Loop over data.
-        # loop=tqdm(enumerate(LC_train_loader , start =epoch*len(LC_train_loader)), total=len(LC_train_loader))
-        for step , (inputs, target) in enumerate(LC_train_loader , start =epoch*len(LC_train_loader):
+        loop=tqdm(enumerate(LC_train_loader , start =epoch*len(LC_train_loader)), total=len(LC_train_loader))
+        for step , (inputs, target) in loop:
             # Forward pass.
+            # print(f'inputs shape {inputs.shape}')
             output = linear_classifer(inputs.to(device))
+            # print(f'output shape {output.shape}')
             loss = cfg['criterion'](output.to(device), target.to(device))
+            # print(f'loss {loss.item()}')
             # Backward pass.
             loss = loss / cfg['accumulation_steps'] # Normalize our loss (if averaged)
+            # print(f'2 loss {loss}')
             loss.backward()
+            # print('loss backward')
 
-            if epoch+1 % cfg['accumulation_steps']==0:
-              print('optimizer step')
-              optimizer.step()
-              optimizer.zero_grad()
+            # if epoch+1 % cfg['accumulation_steps']==0:
+              # print('optimizer step')
+            optimizer.step()
+            optimizer.zero_grad()
 
             # NOTE: It is important to call .item() on the loss before summing.
             if ema_loss is None:
@@ -166,9 +185,9 @@ def train_linear_classifer(cfg):
             # print(f'correct {correct}')
             num_examples+= inputs.shape[0]
             train_acc=correct/num_examples
-            #tqdm comment the next two lines if tqdm progress bar doesn't appear in colab
-            # loop.set_description(f"Epoch [{epoch+1}/{cfg['epochs']}]")
-            # loop.set_postfix(loss=ema_loss, acc=train_acc)
+            #tqdm
+            loop.set_description(f"Epoch [{epoch+1}/{cfg['epochs']}]")
+            loop.set_postfix(loss=ema_loss, acc=train_acc)
 
         #write the loss to tensorboard    
         writer.add_scalar('train loss', ema_loss, global_step=epoch)
@@ -186,12 +205,12 @@ def train_linear_classifer(cfg):
           writer.add_scalar('val acc', val_acc, global_step=epoch)
           val_accs.append(val_acc)
         
-        linear_classifer_ckpt={'LC_sate_dict':ckpt_state.state_dict(), 'epochs':epoch+1}
-        if cfg['early_stopping']:
-          early_stopping(val_acc,linear_classifer_ckpt)
-          if early_stopping.early_stop:
-              print(f'Early stopping at epoch {epoch}/{cfg["epochs"]}....')
-              break
+        # ckpt_state={'model_sate_dict':model.state_dict(), 'epochs':epoch+1, 'best_val_acc':best_val_acc}
+        # if cfg['early_stopping']:
+        #   early_stopping(val_acc,chk_point_state)
+        #   if early_stopping.early_stop:
+        #       print(f'Early stopping at epoch {epoch}/{cfg["epochs"]}....')
+        #       break
         print('-------------------------------------------------------------')
 
     return train_accs , val_accs, losses
