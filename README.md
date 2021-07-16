@@ -11,7 +11,7 @@ The table contains the first result I got (without any hyperparameters tuning), 
 
 
 **For selfsupervised pretraining:**
-Run the next command to train resnet18 on cifar10 data set on TPU. The code currently suppport TPU training only. 1 epoch takes around 20 seconds on TPU v2. The batch size here is per TPU core (the TPU has 8 cores), which means a global batch size = batch_size*8. 
+Run the next command to train resnet18 on cifar10 data set on TPU. The code suppports TPU training only. 1 epoch takes around 20 seconds on TPU v2. The batch size here is per TPU core (the TPU has 8 cores), which means a global batch size = batch_size*8. 
 ```
 #global batch size =64*8=512
 !python BarlowTwins-Implementation/main.py --batch-size=64 \
