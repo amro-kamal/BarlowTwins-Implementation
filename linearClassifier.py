@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 import torchvision
 import torchvision.transforms as transforms
-# import tqdm
 from tqdm.notebook import tqdm
 import os
 import logging
@@ -13,8 +12,6 @@ from tqdm.notebook import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
 #TODO
-#check predict function
-#check LC_dataset function
 cfg={
 'criterion' : torch.nn.CrossEntropyLoss(),
 'val_period' : 5,

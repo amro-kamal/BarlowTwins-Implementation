@@ -19,19 +19,18 @@ from torch.utils.tensorboard import SummaryWriter
 import time
 import math
 from torchsummary import summary
-from knn import knn_test
+# from knn import knn_test
 from utils import cifar10_loader
 
 
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
-parser.add_argument('--data', type=str, default='CIFAR10',
-                    help='dataset name')
 parser.add_argument('--workers', default=4, type=int, metavar='N',
                     help='number of data loader workers')
 parser.add_argument('--epochs', default=1, type=int, metavar='N',
                     help='number of total epochs to run')
-parser.add_argument('--batch-size', default=1024, type=int, metavar='N',
+parser.add_argument('--batch-size', default=64, type=int, metavar='N',
                     help='mini-batch size')
+#TODO
 parser.add_argument('--learning-rate-weights', default=0.2, type=float, metavar='LR',
                     help='base learning rate for weights')
 parser.add_argument('--learning-rate-biases', default=0.0048, type=float, metavar='LR',
@@ -40,8 +39,9 @@ parser.add_argument('--weight-decay', default=1e-6, type=float, metavar='W',
                     help='weight decay')
 parser.add_argument('--lambd', default=0.0051, type=float, metavar='L',
                     help='weight on off-diagonal terms')
+#TODO
 parser.add_argument('--optimizer', default='SGD', type=str, choices=('SGD', 'LARS'))
-parser.add_argument('--projector', default='8192-8192-8192', type=str,
+parser.add_argument('--projector', default='512-512-512', type=str,
                     metavar='MLP', help='projector MLP')
 parser.add_argument('--print-freq', default=100, type=int, metavar='N',
                     help='print frequency')
@@ -81,14 +81,13 @@ def main():
  
     start_epoch=0
     args.optimizer_state=None
-    logger.info(args.load_model)
-    # if True and (args.checkpoint_dir / 'checkpoint.pth').is_file():
-    #     logger.info(f'loading the model to continue training.....')
-    #     ckpt = torch.load(args.checkpoint_dir / 'checkpoint.pth',
-    #                       map_location='cpu')
-    #     start_epoch = ckpt['epoch']
-    #     model.load_state_dict(ckpt['model'])
-    #     args.optimizer_state=ckpt['optimizer']
+    logger.info(f'load model {args.load_model}')
+    if False and args.load_model and (args.checkpoint_dir / 'checkpoint.pth').is_file():
+        logger.info(f'loading the model to continue training.....')
+        ckpt = torch.load(args.checkpoint_dir / 'resnet.pth')# map_location='cpu')
+        # start_epoch = ckpt['epoch']
+        # model.load_state_dict(ckpt['model'])
+        # args.optimizer_state=ckpt['optimizer']
 
     args.continue_from=start_epoch
     args.model=model
@@ -110,8 +109,6 @@ def XLA_trainer(index, args):
     # if not xm.is_master_ordinal():
     #     xm.rendezvous('download_only_once')
     
-    # if xm.is_master_ordinal():
-    #   logger.info(f'waiting for {device} to download the data')
     def get_data():
       if xm.is_master_ordinal():
         logger.info(f'Downloading the data.......')
@@ -149,8 +146,9 @@ def XLA_trainer(index, args):
         sampler=train_sampler,
         num_workers=args.workers,
         drop_last=True)
-    
-    knn_train_loader, knn_val_loader  = cifar10_loader(64)
+
+    #TODO
+    knn_train_loader, knn_val_loader  = None,None#cifar10_loader(64)
 
     train(args.model.to(device), args.epochs, train_loader, args.lambd ,device, knn_train_loader, knn_val_loader)
 
@@ -158,7 +156,7 @@ def train(model, epochs, train_loader, lambd, device, knn_train_loader, knn_val_
     global_step=0
     writer=SummaryWriter(args.checkpoint_dir/'tensorboard')
     start_time = time.time()
-    early_stopping = EarlyStopping(patience=1000, verbose=True ,path=args.checkpoint_dir/'checkpoint.pth' )
+    early_stopping = EarlyStopping(patience=1000, verbose=True ,path=args.checkpoint_dir/'checkpoint.pth',logger=logger )
     if args.optimizer=='SGD':
       optimizer = optim.SGD(model.parameters(), lr=1e-3,
                               momentum=0.9, weight_decay=5e-4)
@@ -200,19 +198,16 @@ def train(model, epochs, train_loader, lambd, device, knn_train_loader, knn_val_
               writer.add_scalar('ssloss',loss.item(),global_step=global_step)
               global_step+=1
             if args.optimizer=='LARS':
-              lr_schedular(args, optimizer, para_train_loader, step)
+              LARS_lr_schedular(args, optimizer, para_train_loader, step)
             loss.backward()
+            xm.optimizer_step(optimizer)
+            #update the running loss
             epoch_loss += x1.shape[0] * loss.item()
             num_examples+=x1.shape[0]
-
-            xm.optimizer_step(optimizer)
             # if xm.is_master_ordinal():
             #    print('sum ',torch.sum(model.state_dict()['resnet_backbone.conv1.weight']))
         
-        # if xm.is_master_ordinal():
-            # if xm.is_master_ordinal():
-            #    print('sum ',torch.sum(model.state_dict()['resnet_backbone.conv1.weight']))
-          
+      
         # val_acc = knn_test(model.children())[0], knn_train_loader, knn_val_loader, epoch, args)
         # if xm.is_master_ordinal:
         #     writer.add_scalar('knn acc',val_acc,global_step=epoch)
@@ -220,23 +215,27 @@ def train(model, epochs, train_loader, lambd, device, knn_train_loader, knn_val_
        #saving the model if the loss dicreased  
         epoch_loss=epoch_loss/num_examples
         if xm.is_master_ordinal():
-           logger.info(f'epoch {epoch+1} ended, loss : {epoch_loss}, time: {int(time.time() - epoch_start_time)}, global steps: {global_step}')
+           logger.info(f'epoch {epoch+1} ended, loss : {epoch_loss:.2f}, time: {int(time.time() - epoch_start_time)}, global steps: {global_step}')
            state = dict(epoch=epoch, model=model.state_dict(),
                          optimizer=optimizer.state_dict())
-           early_stopping(epoch_loss,state)
+           xm.save(state, '/', master_only=True, global_master=False)
+           early_stopping(epoch_loss,model.state_dict())
         if early_stopping.early_stop:
             logger.info("Early stopping....")
             break
 
     #save the final model, not necessary the best!!! 
     if xm.is_master_ordinal():
-      logger.info(f'saving the final model , loss: {epoch_loss} .....🤪🤪🤪🤪🤪🤪🤪')
-      xm.save( list( model.children())[0].state_dict(), args.checkpoint_dir/'resnet.pth', master_only=True, global_master=False)
+      logger.info(f'saving the final model , loss: {epoch_loss:.2f} .....🤪🤪🤪🤪🤪🤪🤪')
+      ckpt = torch.load(args.checkpoint_dir / 'checkpoint.pth',
+                          map_location='cpu')
+      model.load_state_dict(ckpt['model'])
+      torch.save( list( model.children())[0].state_dict(), args.checkpoint_dir/'resnet.pth')#, master_only=True, global_master=False)
       logger.info('model saved')
 
 
 
-def lr_schedular(args, optimizer, loader, step):
+def LARS_lr_schedular(args, optimizer, loader, step):
     max_steps = args.epochs * len(loader)
     warmup_steps = 10 * len(loader)
     base_lr = args.batch_size / 256
