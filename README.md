@@ -3,13 +3,32 @@ Pytorch/XLA mplementation for ["Barlow Twins: Self-Supervised Learning via Redun
 
 **Current results**
 
-Model        |  dataset    | linear_classifier test acc |   
------------- | ------------|    ------------------      |    
-resnet18     | Cifar10     |         75.2%              |                     
+Model        |  dataset    | linear_classifier test acc |  finetuning with 10%  | 
+------------ | ------------|    ------------------      |   ------------------  |
+resnet18     | Cifar10     |         70.0%              |          70 .0%       |
  
 The table contains the first result I got (without any hyperparameters tuning), so the results can be improved. The resullts for resnet50 was not good (for the first try also), more experiments on resnet50 will be done 
 
 
+```
+!python BarlowTwins-Implementation/main.py --batch-size=64 \
+                                           --checkpoint-dir=$model_path\
+                                           --load-model=False\
+                                           --epochs=700
+
+```
+
+```
+!python BarlowTwins-Implementation/supervisedEvaluation.py --checkpoint-dir=$model_path\
+                                                           --weights='freeze'
+
+
+```
+
+```
+!python BarlowTwins-Implementation/supervisedEvaluation.py --checkpoint-dir=$model_path\
+                                                           --weights='finetune'
+```
 
 ### Linear Classification evaluation: 
 
