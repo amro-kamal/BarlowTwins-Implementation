@@ -1,7 +1,8 @@
 from logging import getLogger, INFO, FileHandler,  Formatter,  StreamHandler
 from torchvision.transforms import transforms
 import torch_xla.core.xla_model as xm
-
+import torchvision
+import torch
 def init_logger(log_file='train.log'):
     logger = getLogger(__name__)
     logger.setLevel(INFO)
@@ -40,8 +41,8 @@ def cifar10_loader(batch_size):
     rank=xm.get_ordinal(),
     shuffle=True)
 
-    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, sampler=train_sampler, shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_data, batch_size=batch_size, sampler=val_sampler, shuffle=True)
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=batch_size, sampler=train_sampler)
+    val_loader = torch.utils.data.DataLoader(val_data, batch_size=batch_size, sampler=val_sampler)
 
     return train_loader, val_loader
 

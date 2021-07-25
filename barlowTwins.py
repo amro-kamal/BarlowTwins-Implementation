@@ -4,15 +4,13 @@ import torch.nn as nn
 import copy
 import torch_xla.core.xla_model as xm
 
-
-
 class BarlowTwins(nn.Module):
     ''' 
       resnet with custom FC head
     '''
-    def __init__(self, args , projection_dims=[512,512,512] ):
+    def __init__(self, args  ):
         super().__init__()
-        self.projection_dims=projection_dims
+        self.projection_dims=[int(d) for d in args.projection_dims.split('-')] #projection_dims=[512,512,512]
         self.args=args
         self.resnet_backbone = torchvision.models.resnet50(zero_init_residual=True)
         self.resnet_backbone.fc = nn.Identity()

@@ -1,74 +1,289 @@
-#This code is a modified version of the code at: https://github.com/Bjarten/early-stopping-pytorch/blob/master/pytorchtools.py
-import numpy as np
+import torchvision
+import torchvision.datasets as datasets 
 import torch
+from torch import nn, optim
+from barlowTwins import BarlowTwins
+from dataAugmentation import Transform
+import torch_xla.distributed.parallel_loader as pl
+import torch_xla
 import torch_xla.core.xla_model as xm
-
-class EarlyStopping:
-    """Early stops the training if validation loss doesn't improve after a given patience."""
-    def __init__(self,logger, patience=7, verbose=False, delta=0, path='checkpoint.pt', trace_func=print,min_val_acc_to_save=0.0,criterion='loss'):
-        """
-        Args:
-            patience (int): How long to wait after last time validation loss improved.
-                            Default: 7
-            verbose (bool): If True, prints a message for each validation loss improvement. 
-                            Default: False
-            delta (float): Minimum change in the monitored quantity to qualify as an improvement.
-                            Default: 0
-            path (str): Path for the checkpoint to be saved to.
-                            Default: 'checkpoint.pt'
-            trace_func (function): trace print function.
-                            Default: print            
-        """
-        self.patience = patience
-        self.verbose = verbose
-        self.counter = 0
-        self.best_score = None
-        self.early_stop = False
-        self.val_acc_max = -np.Inf
-        self.delta = delta
-        self.path = path
-        self.trace_func = trace_func
-        self.min_val_acc_to_save=min_val_acc_to_save
-        self.criterion=criterion
-        self.logger=logger
-
-    def __call__(self, validation, state):
-        if self.criterion=='accuracy':
-          score = validation
-        elif self.criterion=='loss':
-          score = -validation
-
-        if self.best_score is None:
-            self.best_score = score
-            self.save_checkpoint(validation, state)
-        elif score < self.best_score + self.delta:
-            self.counter += 1
-            self.trace_func(f'EarlyStopping counter: {self.counter} out of {self.patience}')
-            if self.counter >= self.patience:
-                self.early_stop = True
-        else:    #if score > best
-            self.best_score = score
-            if self.criterion=='accuracy' and score>self.min_val_acc_to_save:
-              self.save_checkpoint(validation, state)
-            elif self.criterion=='loss' :
-              self.save_checkpoint(validation, state)
-            self.counter = 0
+import torch_xla.distributed.xla_multiprocessing as xmp
+import argparse
+from pathlib import Path
+import logging
+from logging import getLogger, INFO, FileHandler,  Formatter,  StreamHandler
+from utils import init_logger
+from earlyStopping import EarlyStopping
+from tqdm.notebook import tqdm
+from torch.utils.tensorboard import SummaryWriter
+import time
+import math
+from torchsummary import summary
+# from knn import knn_test
+from utils import cifar10_loader
 
 
+parser = argparse.ArgumentParser(description='Barlow Twins Training')
+parser.add_argument('--workers', default=4, type=int, metavar='N',
+                    help='number of data loader workers')
+parser.add_argument('--epochs', default=1, type=int, metavar='N',
+                    help='number of total epochs to run')
+parser.add_argument('--batch-size', default=64, type=int, metavar='N',
+                    help='mini-batch size')
+#TODO
+parser.add_argument('--learning-rate-weights', default=0.2, type=float, metavar='LR',
+                    help='base learning rate for weights')
+parser.add_argument('--learning-rate-biases', default=0.0048, type=float, metavar='LR',
+                    help='base learning rate for biases and batch norm parameters')
+parser.add_argument('--weight-decay', default=1e-6, type=float, metavar='W',
+                    help='weight decay')
+parser.add_argument('--lambd', default=0.0051, type=float, metavar='L',
+                    help='weight on off-diagonal terms')
+#TODO
+parser.add_argument('--optimizer', default='SGD', type=str, choices=('SGD', 'LARS'))
+parser.add_argument('--projector', default='512-512-512', type=str,
+                    metavar='MLP', help='projector MLP')
+parser.add_argument('--print-freq', default=100, type=int, metavar='N',
+                    help='print frequency')
+parser.add_argument('--checkpoint-dir', default='./checkpoint/', type=Path,
+                    metavar='DIR', help='path to checkpoint directory')
+parser.add_argument('--load-model',default=False, type=bool)
+parser.add_argument('--print-model-summary', default=False, type=bool)
+
+args=parser.parse_args()
+logger=init_logger()
+
+ #TODO : save ad load the model and optimizer                   
+def main():
+    '''
+     args={'model':model, 'epochs':epochs, 'batch_size':batch_size, 'num_workers':num_workers,
+           'lambd':lambd, 'optimizer':optimizer, 'transforms':Transform(), 'seed':seed}
+    '''
+    SEED=44
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
+    # xm.set_rng_seed(SEED)
+
+    logger.info('building Resnet twins.....')
+    model = BarlowTwins(args)
+    if args.print_model_summary:
+      summary(model, [(3, 32, 32),(3,32,32)])
 
 
+    param_weights = []
+    param_biases = []
+    for param in model.parameters():
+        if param.ndim == 1:
+            param_biases.append(param)
+        else:
+            param_weights.append(param)
+    parameters = [{'params': param_weights}, {'params': param_biases}]
+ 
+    start_epoch=0
+    args.optimizer_state=None
+    logger.info(f'load model {args.load_model}')
+    if False and args.load_model and (args.checkpoint_dir / 'checkpoint.pth').is_file():
+        logger.info(f'loading the model to continue training.....')
+        ckpt = torch.load(args.checkpoint_dir / 'resnet.pth')# map_location='cpu')
+        # start_epoch = ckpt['epoch']
+        # model.load_state_dict(ckpt['model'])
+        # args.optimizer_state=ckpt['optimizer']
 
-    def save_checkpoint(self, val_acc, state):
-        '''Saves model when validation acc increase.'''
-        if self.verbose:
-            if self.criterion=='accuracy':
-              self.logger.info(f'Validation acc increased ({self.val_acc_max:.2f} --> {val_acc:.2f}).  Saving the model ...')
-            if self.criterion=='loss':
-              self.logger.info(f'Validation loss decreased ({self.val_acc_max:.2f} --> {val_acc:.2f}).  Saving the model ...')
-        # torch.save(model.state_dict(), self.path)
+    args.continue_from=start_epoch
+    args.model=model
+    args.transforms=Transform()
+    args.seed=44
+ 
+    logger.info(f'calling spawn ...')
+    xmp.spawn(XLA_trainer, args=(args,), nprocs=8, start_method='fork')
+
+SERIAL_EXEC = xmp.MpSerialExecutor()
+
+def XLA_trainer(index, args):
+    '''
+    1-create sampler
+    2-create dataloader
+    3-call train() function
+    '''
+   
+    def get_data():
+      if xm.is_master_ordinal():
+        logger.info(f'Downloading the data.......')
+      train_dataset = datasets.CIFAR10(
+          "/data",
+          train=True,
+          download=True,
+          transform=args.transforms
+          ) 
+      return train_dataset
+
+    train_dataset=SERIAL_EXEC.run(get_data)
+  
+    device = xm.xla_device()  
+    # Sets a common random seed - both for initialization and ensuring graph is the same
+    torch.manual_seed(args.seed)
+
+    # Creates the (distributed) train sampler, which let this process only access
+    # its portion of the training dataset.
+    train_sampler = torch.utils.data.distributed.DistributedSampler(
+        train_dataset,
+        num_replicas=xm.xrt_world_size(),
+        rank=xm.get_ordinal(),
+        shuffle=True)
+
+    # Creates dataloaders, which load data in batches
+    logger.info(f'batch size {args.batch_size}')
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        sampler=train_sampler,
+        num_workers=args.workers,
+        drop_last=True)
+
+    ########TODO#########
+    knn_train_loader, knn_val_loader  = None,None#cifar10_loader(64)
+
+    train(args.model.to(device), args.epochs, train_loader, args.lambd ,device, knn_train_loader, knn_val_loader)
+
+def train(model, epochs, train_loader, lambd, device, knn_train_loader, knn_val_loader):
+    global_step=0
+    writer=SummaryWriter(args.checkpoint_dir/'tensorboard')
+    start_time = time.time()
+    early_stopping = EarlyStopping(patience=1000, verbose=True ,path=args.checkpoint_dir/'checkpoint.pth',logger=logger )
+    if args.optimizer=='SGD':
+      optimizer = optim.SGD(model.parameters(), lr=1e-3,
+                              momentum=0.9, weight_decay=5e-4)
+    else: 
+      param_weights = []
+      param_biases = []
+      for param in model.parameters():
+          if param.ndim == 1:
+              param_biases.append(param)
+          else:
+              param_weights.append(param)
+ 
+      parameters = [{'params': param_weights}, {'params': param_biases}]                       
+      optimizer = LARS(parameters, lr=0, weight_decay=args.weight_decay,
+                    weight_decay_filter=exclude_bias_and_norm,
+                    lars_adaptation_filter=exclude_bias_and_norm)
+
+    #for continuing training
+    if args.optimizer_state:
+        #The loaded optimizer must be compatible with the choice in args.optimizer
+        optimizer.load_state_dict(args.optimizer)
+
+    for epoch in range(args.continue_from, args.continue_from+epochs):
+        #The loaded optimizer must be compatible with the choice in args.optimizer
         if xm.is_master_ordinal():
-          state['best_val_acc']=self.best_score
-          torch.save(state, self.path)#, master_only=True, global_master=False)
-        self.logger.info('model saved ✅✅')
+            logger.info(f'[{xm.get_ordinal()}] device {device} , epoch {epoch+1}')
+        epoch_loss=0
+        num_examples=0
+        epoch_start_time = time.time()
+        model.train()
 
-        self.val_acc_max = val_acc
+        #ParallelLoader, so each TPU core has unique batch
+        para_train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
+        step = epoch * len(para_train_loader)-1
+        for ((x1, x2), _) in para_train_loader: #, start=epoch * len(para_train_loader)):
+            step+=1
+            optimizer.zero_grad()
+            loss=model(x1, x2)
+            if xm.is_master_ordinal:
+              writer.add_scalar('ssloss',loss.item(),global_step=global_step)
+              global_step+=1
+            if args.optimizer=='LARS':
+              LARS_lr_schedular(args, optimizer, para_train_loader, step)
+            loss.backward()
+            xm.optimizer_step(optimizer)
+            #update the running loss
+            epoch_loss += x1.shape[0] * loss.item()
+            num_examples+=x1.shape[0]
+            # if xm.is_master_ordinal():
+            #    print('sum ',torch.sum(model.state_dict()['resnet_backbone.conv1.weight']))
+        
+        ########TODO#########
+        # val_acc = knn_test(model.children())[0], knn_train_loader, knn_val_loader, epoch, args)
+        # if xm.is_master_ordinal:
+        #     writer.add_scalar('knn acc',val_acc,global_step=epoch)
+
+        #saving the model if the loss dicreased  
+        epoch_loss=epoch_loss/num_examples
+        if xm.is_master_ordinal():
+           logger.info(f'epoch {epoch+1} ended, loss : {epoch_loss:.2f}, time: {int(time.time() - epoch_start_time)}, global steps: {global_step}')
+           state = dict(epoch=epoch, model=model.state_dict(),
+                         optimizer=optimizer.state_dict())
+          #  xm.save(state, args.checkpoint_dir / 'checkpoint.pth', master_only=True, global_master=False)
+           early_stopping(epoch_loss, state)
+        if early_stopping.early_stop:
+            logger.info("Early stopping....")
+            break
+
+    #save the final model!!! 
+    if xm.is_master_ordinal():
+      logger.info(f'saving the final model , loss: {epoch_loss:.2f} .....🤪🤪🤪🤪🤪🤪🤪')
+      ckpt = torch.load(args.checkpoint_dir / 'checkpoint.pth',
+                          map_location='cpu')
+      model.load_state_dict(ckpt['model'])
+      torch.save( list( model.children())[0].state_dict(), args.checkpoint_dir/'resnet.pth')#, master_only=True, global_master=False)
+      logger.info('model saved')
+
+
+
+def LARS_lr_schedular(args, optimizer, loader, step):
+    max_steps = args.epochs * len(loader)
+    warmup_steps = 10 * len(loader)
+    base_lr = args.batch_size / 256
+    if step < warmup_steps:
+        lr = base_lr * step / warmup_steps
+    else:
+        step -= warmup_steps
+        max_steps -= warmup_steps
+        q = 0.5 * (1 + math.cos(math.pi * step / max_steps))
+        end_lr = base_lr * 0.001
+        lr = base_lr * q + end_lr * (1 - q)
+    optimizer.param_groups[0]['lr'] = lr * args.learning_rate_weights
+    optimizer.param_groups[1]['lr'] = lr * args.learning_rate_biases
+    
+#LARS optimizer : the code for LARs is from the original implementation
+class LARS(optim.Optimizer):
+    def __init__(self, params, lr, weight_decay=0, momentum=0.9, eta=0.001,
+                 weight_decay_filter=None, lars_adaptation_filter=None):
+        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum,
+                        eta=eta, weight_decay_filter=weight_decay_filter,
+                        lars_adaptation_filter=lars_adaptation_filter)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self):
+        for g in self.param_groups:
+            for p in g['params']:
+                dp = p.grad
+
+                if dp is None:
+                    continue
+
+                if g['weight_decay_filter'] is None or not g['weight_decay_filter'](p):
+                    dp = dp.add(p, alpha=g['weight_decay'])
+
+                if g['lars_adaptation_filter'] is None or not g['lars_adaptation_filter'](p):
+                    param_norm = torch.norm(p)
+                    update_norm = torch.norm(dp)
+                    one = torch.ones_like(param_norm)
+                    q = torch.where(param_norm > 0.,
+                                    torch.where(update_norm > 0,
+                                                (g['eta'] * param_norm / update_norm), one), one)
+                    dp = dp.mul(q)
+
+                param_state = self.state[p]
+                if 'mu' not in param_state:
+                    param_state['mu'] = torch.zeros_like(p)
+                mu = param_state['mu']
+                mu.mul_(g['momentum']).add_(dp)
+
+                p.add_(mu, alpha=-g['lr'])
+
+def exclude_bias_and_norm(p):
+    return p.ndim == 1
+
+if __name__ == '__main__':
+    main()

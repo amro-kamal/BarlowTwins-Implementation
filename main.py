@@ -82,15 +82,16 @@ def main():
     start_epoch=0
     args.optimizer_state=None
     logger.info(f'load model {args.load_model}')
-    if False and args.load_model and (args.checkpoint_dir / 'checkpoint.pth').is_file():
+    if  args.load_model and (args.checkpoint_dir / 'checkpoint.pth').is_file():
         logger.info(f'loading the model to continue training.....')
         ckpt = torch.load(args.checkpoint_dir / 'resnet.pth')# map_location='cpu')
-        # start_epoch = ckpt['epoch']
-        # model.load_state_dict(ckpt['model'])
-        # args.optimizer_state=ckpt['optimizer']
+        start_epoch = ckpt['epoch']
+        model.load_state_dict(ckpt['model'])
+        args.optimizer_state=ckpt['optimizer']
 
-    args.continue_from=start_epoch
-    args.model=model
+    args.continue_from = start_epoch
+    args.model = xmp.MpModelWrapper(model)
+
     args.transforms=Transform()
     args.seed=44
  
@@ -214,12 +215,14 @@ def train(model, epochs, train_loader, lambd, device, knn_train_loader, knn_val_
 
        #saving the model if the loss dicreased  
         epoch_loss=epoch_loss/num_examples
+        state = dict(epoch=epoch, model=model.state_dict(),optimizer=optimizer.state_dict())
+        xm.save(state, args.checkpoint_dir / 'checkpoint.pth' , master_only=True, global_master=False)
+        print('moving to early stopping')
         if xm.is_master_ordinal():
            logger.info(f'epoch {epoch+1} ended, loss : {epoch_loss:.2f}, time: {int(time.time() - epoch_start_time)}, global steps: {global_step}')
            state = dict(epoch=epoch, model=model.state_dict(),
                          optimizer=optimizer.state_dict())
-           xm.save(state, '/', master_only=True, global_master=False)
-           early_stopping(epoch_loss,model.state_dict())
+           early_stopping(epoch_loss,state)
         if early_stopping.early_stop:
             logger.info("Early stopping....")
             break
@@ -227,11 +230,11 @@ def train(model, epochs, train_loader, lambd, device, knn_train_loader, knn_val_
     #save the final model, not necessary the best!!! 
     if xm.is_master_ordinal():
       logger.info(f'saving the final model , loss: {epoch_loss:.2f} .....🤪🤪🤪🤪🤪🤪🤪')
-      ckpt = torch.load(args.checkpoint_dir / 'checkpoint.pth',
-                          map_location='cpu')
+      ckpt = torch.load(args.checkpoint_dir / 'checkpoint.pth',map_location='cpu')
       model.load_state_dict(ckpt['model'])
-      torch.save( list( model.children())[0].state_dict(), args.checkpoint_dir/'resnet.pth')#, master_only=True, global_master=False)
-      logger.info('model saved')
+
+    xm.save( list( model.children())[0].state_dict(), args.checkpoint_dir/'resnet.pth')#, master_only=True, global_master=False)
+    logger.info('model saved')
 
 
 
