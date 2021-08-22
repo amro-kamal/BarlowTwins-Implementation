@@ -22,7 +22,6 @@ from torchsummary import summary
 # from knn import knn_test
 from utils import cifar10_loader
 
-
 parser = argparse.ArgumentParser(description='Barlow Twins Training')
 parser.add_argument('--workers', default=4, type=int, metavar='N',
                     help='number of data loader workers')
@@ -82,7 +81,7 @@ def main():
     start_epoch=0
     args.optimizer_state=None
     logger.info(f'load model {args.load_model}')
-    if  args.load_model and (args.checkpoint_dir / 'checkpoint.pth').is_file():
+    if  args.load_model=='load' and (args.checkpoint_dir / 'checkpoint.pth').is_file():
         logger.info(f'loading the model to continue training.....')
         ckpt = torch.load(args.checkpoint_dir / 'resnet.pth')# map_location='cpu')
         start_epoch = ckpt['epoch']
@@ -161,7 +160,7 @@ def train(model, epochs, train_loader, lambd, device, knn_train_loader, knn_val_
     if args.optimizer=='SGD':
       optimizer = optim.SGD(model.parameters(), lr=1e-3,
                               momentum=0.9, weight_decay=5e-4)
-    else: 
+    else:  #LARS
       param_weights = []
       param_biases = []
       for param in model.parameters():
@@ -216,25 +215,27 @@ def train(model, epochs, train_loader, lambd, device, knn_train_loader, knn_val_
        #saving the model if the loss dicreased  
         epoch_loss=epoch_loss/num_examples
         state = dict(epoch=epoch, model=model.state_dict(),optimizer=optimizer.state_dict())
-        xm.save(state, args.checkpoint_dir / 'checkpoint.pth' , master_only=True, global_master=False)
-        print('moving to early stopping')
+        # xm.save(state, args.checkpoint_dir / 'checkpoint.pth' , master_only=True, global_master=False)
+        # print('moving to early stopping')
         if xm.is_master_ordinal():
-           logger.info(f'epoch {epoch+1} ended, loss : {epoch_loss:.2f}, time: {int(time.time() - epoch_start_time)}, global steps: {global_step}')
-           state = dict(epoch=epoch, model=model.state_dict(),
-                         optimizer=optimizer.state_dict())
-           early_stopping(epoch_loss,state)
+          logger.info(f'epoch {epoch+1} ended, loss : {epoch_loss:.2f}, time: {int(time.time() - epoch_start_time)}, global steps: {global_step}')
+        state = dict(epoch=epoch, model=model.state_dict(),
+                      optimizer=optimizer.state_dict())
+        early_stopping(epoch_loss,state)
         if early_stopping.early_stop:
             logger.info("Early stopping....")
             break
 
     #save the final model, not necessary the best!!! 
     if xm.is_master_ordinal():
-      logger.info(f'saving the final model , loss: {epoch_loss:.2f} .....🤪🤪🤪🤪🤪🤪🤪')
       ckpt = torch.load(args.checkpoint_dir / 'checkpoint.pth',map_location='cpu')
+      print(ckpt.keys())
       model.load_state_dict(ckpt['model'])
-
-    xm.save( list( model.children())[0].state_dict(), args.checkpoint_dir/'resnet.pth')#, master_only=True, global_master=False)
-    logger.info('model saved')
+      logger.info(f'saving the final model , loss: {epoch_loss:.2f} .....🤪🤪🤪🤪🤪🤪🤪')
+    #save: must be outsise the if statement
+    state['resnet_backbone'] = list( model.children())[0].state_dict()
+    xm.save(state, args.checkpoint_dir/'final_resnet18.pth', master_only=True, global_master=False)
+    # logger.info('final model saved')
 
 
 
